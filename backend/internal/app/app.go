@@ -1,0 +1,351 @@
+package app
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"runtime/debug"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+	"qpix/internal/config"
+	"qpix/internal/database"
+	"qpix/internal/storage"
+)
+
+type App struct {
+	cfg                       config.Config
+	db                        *gorm.DB
+	stores                    map[string]storage.Store
+	processing                chan struct{}
+	loginLimits, uploadLimits limiter
+	settingsMu                sync.RWMutex
+	publicURL                 string
+	maxUploadBytes            int64
+	profiles                  map[string]database.StorageProfile
+	masterKey                 []byte
+	defaultStorage            string
+	processingSettings        processingSettings
+	accessRules               map[string]accessRule
+	trustedProxies            []netip.Prefix
+	policyMu                  sync.RWMutex
+	quotaMu                   sync.Mutex
+}
+
+type principal struct {
+	User    database.User
+	Session *database.Session
+}
+type protectedHandler func(http.ResponseWriter, *http.Request, principal)
+
+func New(cfg config.Config, db *gorm.DB, stores map[string]storage.Store) (*App, error) {
+	if stores["local"] == nil {
+		return nil, errors.New("缺少本地存储驱动")
+	}
+	a := &App{cfg: cfg, db: db, stores: stores, processing: make(chan struct{}, 2), publicURL: cfg.PublicURL, maxUploadBytes: cfg.MaxUploadBytes}
+	var count int64
+	if err := db.Model(&database.User{}).Count(&count).Error; err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		if cfg.AdminPassword == "" || len(cfg.AdminPassword) > 72 {
+			return nil, errors.New("首次启动请设置非空 QPIX_ADMIN_PASSWORD，最多 72 字节")
+		}
+		if strings.TrimSpace(cfg.AdminUsername) == "" || len(cfg.AdminUsername) > 64 {
+			return nil, errors.New("管理员名称长度必须在 1–64 字节之间")
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(cfg.AdminPassword), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, err
+		}
+		if err = db.Create(&database.User{ID: randomID(), Username: cfg.AdminUsername, PasswordHash: string(hash), Role: "admin", Enabled: true}).Error; err != nil {
+			return nil, err
+		}
+	}
+	var setting database.Setting
+	err := db.Where(map[string]any{"key": "public_url"}).First(&setting).Error
+	if err == nil {
+		a.publicURL = setting.Value
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if err = config.ValidateURL(a.publicURL); err != nil {
+		return nil, err
+	}
+	if err = a.initRuntime(); err != nil {
+		return nil, err
+	}
+	// 单实例启动时没有在途上传，清除异常退出遗留的容量预占记录。
+	if err = db.Where("1 = 1").Delete(&database.UploadReservation{}).Error; err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+func (a *App) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/health", a.health)
+	mux.HandleFunc("POST /api/v1/auth/login", a.login)
+	mux.HandleFunc("GET /api/v1/auth/me", a.protect(a.me, false))
+	mux.HandleFunc("POST /api/v1/auth/logout", a.protect(a.logout, false))
+	mux.HandleFunc("PUT /api/v1/auth/password", a.secure(a.changePassword, false, "write"))
+	mux.HandleFunc("GET /api/v1/images", a.protect(a.listImages, false))
+	mux.HandleFunc("POST /api/v1/images", a.protect(a.upload, true))
+	mux.HandleFunc("PATCH /api/v1/images/{id}", a.protect(a.updateImage, false))
+	mux.HandleFunc("POST /api/v1/images/batch-delete", a.protect(a.deleteImages, false))
+	mux.HandleFunc("GET /api/v1/albums", a.protect(a.listAlbums, false))
+	mux.HandleFunc("POST /api/v1/albums", a.admin(a.createAlbum, true))
+	mux.HandleFunc("PATCH /api/v1/albums/{id}", a.admin(a.renameAlbum, true))
+	mux.HandleFunc("DELETE /api/v1/albums/{id}", a.admin(a.deleteAlbum, true))
+	mux.HandleFunc("PUT /api/v1/albums/{id}/access", a.admin(a.updateAlbumAccess, true))
+	mux.HandleFunc("GET /api/v1/users", a.admin(a.listUsers, false))
+	mux.HandleFunc("POST /api/v1/users", a.admin(a.saveUser, true))
+	mux.HandleFunc("PUT /api/v1/users/{id}", a.admin(a.saveUser, true))
+	mux.HandleFunc("GET /api/v1/upload-options", a.protect(a.uploadOptions, false))
+	mux.HandleFunc("GET /api/v1/shares", a.admin(a.listShares, false))
+	mux.HandleFunc("POST /api/v1/shares", a.admin(a.createShare, true))
+	mux.HandleFunc("DELETE /api/v1/shares/{id}", a.admin(a.revokeShare, true))
+	mux.HandleFunc("GET /api/v1/public-shares/{token}", a.publicShare)
+	mux.HandleFunc("POST /api/v1/public-shares/{token}/unlock", a.unlockShare)
+	mux.HandleFunc("GET /si/{token}/{file}", a.serveShareImage)
+	mux.HandleFunc("GET /api/v1/tokens", a.protect(a.listTokens, false))
+	mux.HandleFunc("POST /api/v1/tokens", a.protect(a.createToken, false))
+	mux.HandleFunc("DELETE /api/v1/tokens/{id}", a.protect(a.revokeToken, false))
+	mux.HandleFunc("GET /api/v1/stats", a.protect(a.stats, false))
+	mux.HandleFunc("GET /api/v1/settings", a.admin(a.settings, false))
+	mux.HandleFunc("PATCH /api/v1/settings", a.admin(a.updateSettings, true))
+	mux.HandleFunc("GET /api/v1/storages", a.admin(a.listProfiles, false))
+	mux.HandleFunc("POST /api/v1/storages", a.admin(a.createProfile, false))
+	mux.HandleFunc("PUT /api/v1/storages/{id}", a.admin(a.updateProfile, false))
+	mux.HandleFunc("DELETE /api/v1/storages/{id}", a.admin(a.deleteProfile, false))
+	mux.HandleFunc("POST /api/v1/storages/{id}/default", a.admin(a.defaultProfile, false))
+	mux.HandleFunc("POST /api/v1/storages/{id}/test", a.admin(a.testProfile, false))
+	mux.HandleFunc("GET /api/v1/processing", a.admin(a.getProcessing, false))
+	mux.HandleFunc("PUT /api/v1/processing", a.admin(a.updateProcessing, false))
+	mux.HandleFunc("GET /api/v1/access", a.admin(a.listAccess, false))
+	mux.HandleFunc("PUT /api/v1/access/{scope}", a.admin(a.updateAccess, false))
+	mux.HandleFunc("GET /i/{file}", a.serveImage)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				slog.Error("请求处理异常", "error", recovered, "stack", string(debug.Stack()))
+				fail(w, 500, "服务暂时不可用")
+			}
+		}()
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		if !a.enforceAccess(w, r) {
+			return
+		}
+		if r.Method != "GET" && r.Method != "HEAD" && !a.sameOrigin(r) {
+			fail(w, 403, "请求来源不被允许")
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func (a *App) sameOrigin(r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	if a.cfg.AppURL != "" {
+		return origin == a.cfg.AppURL
+	}
+	u, err := url.Parse(origin)
+	return err == nil && u.Host == r.Host && (u.Scheme == "http" || u.Scheme == "https")
+}
+
+func (a *App) protect(next protectedHandler, allowToken bool) http.HandlerFunc {
+	return a.secure(next, allowToken, "any")
+}
+
+func (a *App) admin(next protectedHandler, write bool) http.HandlerFunc {
+	mode := "admin"
+	if write {
+		mode = "admin-write"
+	}
+	return a.secure(next, false, mode)
+}
+
+func (a *App) secure(next protectedHandler, allowToken bool, mode string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 权限写操作与在途上传、移动互斥，避免撤销授权后仍建立新的相册引用。
+		if mode == "admin-write" || mode == "write" {
+			a.policyMu.Lock()
+			defer a.policyMu.Unlock()
+		} else {
+			a.policyMu.RLock()
+			defer a.policyMu.RUnlock()
+		}
+		db := a.db.WithContext(r.Context())
+		var p principal
+		if header := r.Header.Get("Authorization"); header != "" {
+			if !allowToken || !strings.HasPrefix(header, "Bearer ") {
+				fail(w, 401, "此接口不接受该凭据")
+				return
+			}
+			var token database.APIToken
+			if err := db.First(&token, "hash = ? AND (expires_at IS NULL OR expires_at > ?)", digest(strings.TrimPrefix(header, "Bearer ")), time.Now().UTC()).Error; err != nil {
+				authError(w, err, "上传 Token 无效或已过期")
+				return
+			}
+			if err := db.First(&p.User, "id = ?", token.UserID).Error; err != nil {
+				authError(w, err, "账号不存在")
+				return
+			}
+		} else {
+			cookie, err := r.Cookie("qpix_session")
+			if err != nil {
+				fail(w, 401, "请先登录")
+				return
+			}
+			var session database.Session
+			if err = db.First(&session, "id = ? AND expires_at > ?", digest(cookie.Value), time.Now().UTC()).Error; err != nil {
+				authError(w, err, "登录已失效，请重新登录")
+				return
+			}
+			if err = db.First(&p.User, "id = ?", session.UserID).Error; err != nil {
+				authError(w, err, "账号不存在")
+				return
+			}
+			if r.Method != "GET" && r.Method != "HEAD" && subtle.ConstantTimeCompare([]byte(session.CSRF), []byte(r.Header.Get("X-CSRF-Token"))) != 1 {
+				fail(w, 403, "安全校验失败，请刷新页面")
+				return
+			}
+			p.Session = &session
+		}
+		if !p.User.Enabled {
+			fail(w, 401, "账号已停用")
+			return
+		}
+		if strings.HasPrefix(mode, "admin") && p.User.Role != "admin" {
+			fail(w, 403, "此账号没有操作权限")
+			return
+		}
+		if !(r.Method == "POST" && r.URL.Path == "/api/v1/images") {
+			scope := "images"
+			if p.User.Role == "admin" {
+				scope = "admin"
+			}
+			if !a.enforceScope(w, r, scope) {
+				return
+			}
+		}
+		next(w, r, p)
+	}
+}
+
+func authError(w http.ResponseWriter, err error, text string) {
+	// 数据库暂时不可用不等于会话失效，避免前端因此清空有效登录。
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		fail(w, 401, text)
+	} else {
+		internal(w, err)
+	}
+}
+
+func (a *App) health(w http.ResponseWriter, r *http.Request) {
+	pool, err := a.db.DB()
+	if err != nil || pool.PingContext(r.Context()) != nil {
+		fail(w, 503, "数据库不可用")
+		return
+	}
+	respond(w, 200, map[string]string{"status": "ok"})
+}
+
+func decode(w http.ResponseWriter, r *http.Request, dest any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dest); err != nil {
+		fail(w, 400, "请求内容无效")
+		return false
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		fail(w, 400, "请求必须包含一个 JSON 对象")
+		return false
+	}
+	return true
+}
+
+func respond(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		slog.Debug("响应写入中断", "error", err)
+	}
+}
+func fail(w http.ResponseWriter, status int, message string) {
+	respond(w, status, map[string]string{"error": message})
+}
+func internal(w http.ResponseWriter, err error) {
+	slog.Error("操作失败", "error", err)
+	fail(w, 500, "操作失败，请稍后重试")
+}
+func randomID() string { return randomHex(16) }
+func randomHex(size int) string {
+	b := make([]byte, size)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Errorf("随机数生成失败：%w", err))
+	}
+	return hex.EncodeToString(b)
+}
+func digest(value string) string {
+	result := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(result[:])
+}
+
+type window struct {
+	count int
+	until time.Time
+}
+type limiter struct {
+	mu      sync.Mutex
+	entries map[string]window
+}
+
+func (l *limiter) allow(key string, limit int, duration time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.entries == nil {
+		l.entries = make(map[string]window)
+	}
+	now := time.Now()
+	if len(l.entries) > 1024 {
+		for key, entry := range l.entries {
+			if !entry.until.After(now) {
+				delete(l.entries, key)
+			}
+		}
+	}
+	entry := l.entries[key]
+	if !entry.until.After(now) {
+		entry = window{until: now.Add(duration)}
+	}
+	if entry.count >= limit || len(l.entries) > 10000 {
+		return false
+	}
+	entry.count++
+	l.entries[key] = entry
+	return true
+}

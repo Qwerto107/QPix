@@ -1,0 +1,8 @@
+.git
+.cache
+.env
+**/node_modules
+**/dist
+**/data
+**/*.exe
+**/*.log

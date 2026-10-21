@@ -1,0 +1,46 @@
+name: qpix
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+    restart: unless-stopped
+    environment:
+      QPIX_ADDR: 0.0.0.0:8080
+      QPIX_ADMIN_USERNAME: ${QPIX_ADMIN_USERNAME:-admin}
+      QPIX_ADMIN_PASSWORD: ${QPIX_ADMIN_PASSWORD:?请在 .env 中填写初始管理员密码}
+      QPIX_DB_DRIVER: ${QPIX_DB_DRIVER:-sqlite}
+      QPIX_DB_DSN: ${QPIX_DB_DSN:-/data/qpix.db}
+      QPIX_STORAGE_ROOT: ${QPIX_STORAGE_ROOT:-/data/uploads}
+      QPIX_MASTER_KEY_FILE: ${QPIX_MASTER_KEY_FILE:-/data/master.key}
+      QPIX_TRUSTED_PROXIES: ${QPIX_TRUSTED_PROXIES:-}
+      QPIX_DISABLE_ACCESS_RULES: ${QPIX_DISABLE_ACCESS_RULES:-false}
+      QPIX_MAX_UPLOAD_MB: ${QPIX_MAX_UPLOAD_MB:-20}
+      QPIX_SECURE_COOKIE: ${QPIX_SECURE_COOKIE:-false}
+      QPIX_APP_URL: ${QPIX_APP_URL:-}
+      QPIX_PUBLIC_URL: ${QPIX_PUBLIC_URL:-}
+    volumes:
+      - data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${QPIX_WEB_PORT:-8090}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  data:

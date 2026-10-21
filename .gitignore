@@ -1,0 +1,8 @@
+.cache/
+.env
+**/data/
+**/node_modules/
+**/dist/
+*.log
+*.exe
+coverage.out

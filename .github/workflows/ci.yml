@@ -1,0 +1,60 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: qpix_test
+          POSTGRES_USER: qpix
+          POSTGRES_PASSWORD: qpix_test_only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U qpix -d qpix_test"
+          --health-interval 5s --health-timeout 5s --health-retries 15
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: qpix_test
+          MYSQL_USER: qpix
+          MYSQL_PASSWORD: qpix_test_only
+          MYSQL_ROOT_PASSWORD: root_test_only
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -proot_test_only"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CGO_ENABLED: "0"
+      QPIX_TEST_POSTGRES_DSN: "host=127.0.0.1 port=5432 user=qpix password=qpix_test_only dbname=qpix_test sslmode=disable"
+      QPIX_TEST_MYSQL_DSN: "qpix:qpix_test_only@tcp(127.0.0.1:3306)/qpix_test?charset=utf8mb4&parseTime=True&loc=UTC"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - run: go test -tags=nodynamic ./... -v
+        working-directory: backend
+      - run: go vet -tags=nodynamic ./...
+        working-directory: backend
+      - run: go build -tags=nodynamic ./cmd/qpix
+        working-directory: backend
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
