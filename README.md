@@ -1,6 +1,6 @@
 # QPix
 
-轻量的个人图床。Go 后端与 Vue 前端独立构建，支持 SQLite、PostgreSQL、MySQL，默认使用本地磁盘存储。
+轻量的个人图床。Go 后端与 Vue 前端分离开发，统一构建为一个镜像、一个服务，支持 SQLite、PostgreSQL、MySQL，默认使用本地磁盘存储。
 
 ## 功能
 
@@ -34,7 +34,9 @@ backend/
   internal/processing/ 压缩与方向处理
   internal/secret/    存储凭据加密
 frontend/src/         Vue、TypeScript 页面与组件
-deploy/              Docker Compose、构建文件与 Nginx 配置
+Dockerfile           前后端统一多阶段构建
+deploy/              单服务 Docker Compose
+.github/             CI/CD 工作流和镜像验证脚本
 docs/                接口、数据备份与存储扩展说明
 ```
 
@@ -79,6 +81,7 @@ npm run dev
 | QPIX_SECURE_COOKIE | false | 通过 HTTPS 访问时设置 true |
 | QPIX_APP_URL | 空 | 管理端完整源地址，如 https://qpix.example.com；生产建议明确设置 |
 | QPIX_PUBLIC_URL | 空 | 图片域名；空值使用相对地址 |
+| QPIX_WEB_ROOT | 空 | 前端构建目录；容器内固定为 /app/web，留空仅提供 API |
 
 通过设置页保存的图片域名优先于环境变量；改为空即可使用当前站点。切换数据库配置只会切换连接，不会自动搬迁数据。数据库与存储目录不要放进前端静态目录。首次本地存储配置在数据库中保存绝对路径；之后调整存储请通过“存储管理”，不要只改环境变量。设置代理和外链缓存的说明见 [访问控制](docs/access.md)。
 
@@ -98,15 +101,30 @@ QPIX_DB_DSN=qpix:YOUR_PASSWORD@tcp(127.0.0.1:3306)/qpix?charset=utf8mb4&parseTim
 
 ## 容器运行
 
-项目根目录复制 `.env.example` 为 `.env`，填写初始密码。然后执行：
+项目根目录复制 `.env.example` 为 `.env`，填写初始密码及镜像版本。发布镜像为 `ghcr.io/qwerto107/qpix`，包含前后端，支持 amd64 / arm64。首次正式版本发布前可使用 `:dev`；生产推荐固定版本标签。
+
+使用已发布镜像：
 
 ```powershell
-docker compose --env-file .env -f deploy/compose.yaml up -d --build
+docker compose --env-file .env -f deploy/compose.yaml pull
+docker compose --env-file .env -f deploy/compose.yaml up -d --no-build
 ```
 
-默认访问 http://127.0.0.1:8090。后端不向宿主机开放端口；前端默认只绑定本机，方便接入已有 HTTPS 反向代理。数据库和图片存入 `qpix_data` 命名卷。生产环境设置 `QPIX_APP_URL` 和 `QPIX_SECURE_COOKIE=true`，将所有管理/API 请求代理到相同源。图片独立域名只需代理 `/i/`。
+也可以在本地一次构建前后端：
 
-管理员在“偏好设置 → 上传限制”设置服务器单张上传上限（1–100 MiB），保存后对新上传生效并持久化，重启后继续使用。用户单张上限为 0 时跟随服务器，独立上限与服务器上限取较小值。仓库 Nginx 请求上限为 101 MiB，覆盖面板最大值及表单开销；自有外层代理仍须放行相应大小的请求。SQLite 采用 WAL 和单连接短事务，仅用于单实例、本机磁盘。PG/MySQL 当前同样按单应用实例使用；多实例迁移调度与分布式限流不在本版范围。
+```powershell
+docker compose --env-file .env -f deploy/compose.yaml up -d --build --pull never
+```
+
+默认访问 http://127.0.0.1:8090。只有一个 `qpix` 服务，由 Go 同时提供页面和 API，默认只绑定宿主机回环地址，方便接入已有 HTTPS 反向代理。数据库和图片存入 `qpix_data` 命名卷。生产环境设置 `QPIX_APP_URL` 和 `QPIX_SECURE_COOKIE=true`，代理整个站点到同一端口。图片独立域名只需代理 `/i/`（分享图片另使用 `/si/`）。
+
+管理员在“偏好设置 → 上传限制”设置服务器单张上传上限（1–100 MiB），保存后对新上传生效并持久化，重启后继续使用。用户单张上限为 0 时跟随服务器，独立上限与服务器上限取较小值。应用按面板配置限制请求体；外层反向代理须额外放行 multipart 开销，例如 Nginx 使用 `client_max_body_size 101m`。SQLite 采用 WAL 和单连接短事务，仅用于单实例、本机磁盘。PG/MySQL 当前同样按单应用实例使用；多实例迁移调度与分布式限流不在本版范围。
+
+## CI/CD
+
+参考 CloudPaste，仅保留一个构建发布任务：PR 只构建统一镜像，不推送；推送 `main` 发布开发镜像 `:dev` 和 `:sha-<12位提交号>`；推送 `vX.Y.Z` 发布 `:X.Y.Z`、`:latest` 和 SHA 标签，预发布标签不更新 latest。Actions 支持手动填写自定义镜像标签。构建过程包含前端类型检查与 Go 编译，不重复启动测试数据库和验证容器。
+
+仅发布一个 `ghcr.io/qwerto107/qpix` 多架构镜像，使用 GitHub 内置 `GITHUB_TOKEN`，无需 Docker Hub 凭据。仓库配置、GHCR 可见性、版本发布及升级方法见 [CI/CD 说明](docs/cicd.md)。
 
 ## 验证
 
@@ -119,6 +137,6 @@ npm ci
 npm run build
 ```
 
-默认执行 SQLite 的完整接口测试和存储路径安全测试。若提供 `QPIX_TEST_POSTGRES_DSN`、`QPIX_TEST_MYSQL_DSN`，同一套接口流程也会在对应数据库运行，未配置时明确跳过。测试使用随机表前缀并在结束时删除这些测试表；请使用专用测试数据库。CI 已配置 PostgreSQL、MySQL 服务及前端构建。
+默认执行 SQLite 的完整接口测试和存储路径安全测试。若提供 `QPIX_TEST_POSTGRES_DSN`、`QPIX_TEST_MYSQL_DSN`，同一套接口流程也会在对应数据库运行，未配置时明确跳过。测试使用随机表前缀并在结束时删除这些测试表；请使用专用测试数据库。数据库测试按需执行，不纳入镜像发布流程。
 
 账号、配额与分享见 [docs/permissions.md](docs/permissions.md)，接口见 [docs/api.md](docs/api.md)，备份恢复见 [docs/operations.md](docs/operations.md)，存储配置见 [docs/storage.md](docs/storage.md)，实际验证范围见 [docs/verification.md](docs/verification.md)。

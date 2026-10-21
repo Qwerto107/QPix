@@ -42,6 +42,7 @@ type App struct {
 	trustedProxies            []netip.Prefix
 	policyMu                  sync.RWMutex
 	quotaMu                   sync.Mutex
+	frontend                  http.Handler
 }
 
 type principal struct {
@@ -54,7 +55,12 @@ func New(cfg config.Config, db *gorm.DB, stores map[string]storage.Store) (*App,
 	if stores["local"] == nil {
 		return nil, errors.New("缺少本地存储驱动")
 	}
+	frontend, err := newFrontend(cfg.WebRoot)
+	if err != nil {
+		return nil, err
+	}
 	a := &App{cfg: cfg, db: db, stores: stores, processing: make(chan struct{}, 2), publicURL: cfg.PublicURL, maxUploadBytes: cfg.MaxUploadBytes}
+	a.frontend = frontend
 	var count int64
 	if err := db.Model(&database.User{}).Count(&count).Error; err != nil {
 		return nil, err
@@ -75,7 +81,7 @@ func New(cfg config.Config, db *gorm.DB, stores map[string]storage.Store) (*App,
 		}
 	}
 	var setting database.Setting
-	err := db.Where(map[string]any{"key": "public_url"}).First(&setting).Error
+	err = db.Where(map[string]any{"key": "public_url"}).First(&setting).Error
 	if err == nil {
 		a.publicURL = setting.Value
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -137,6 +143,9 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/access", a.admin(a.listAccess, false))
 	mux.HandleFunc("PUT /api/v1/access/{scope}", a.admin(a.updateAccess, false))
 	mux.HandleFunc("GET /i/{file}", a.serveImage)
+	if a.frontend != nil {
+		mux.Handle("GET /", a.frontend)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -146,6 +155,7 @@ func (a *App) Handler() http.Handler {
 		}()
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: http: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}

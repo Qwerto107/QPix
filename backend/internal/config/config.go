@@ -14,6 +14,7 @@ type Config struct {
 	MaxUploadBytes, MaxPixels                              int64
 	SecureCookie                                           bool
 	MasterKeyFile                                          string
+	WebRoot                                                string
 	TrustedProxies                                         []string
 	DisableAccessRules                                     bool
 }
@@ -26,6 +27,7 @@ func Load() (Config, error) {
 		AdminUsername: env("QPIX_ADMIN_USERNAME", "admin"), AdminPassword: os.Getenv("QPIX_ADMIN_PASSWORD"),
 		MaxUploadBytes: 20 << 20, MaxPixels: 25_000_000,
 		MasterKeyFile: env("QPIX_MASTER_KEY_FILE", "data/master.key"),
+		WebRoot:       os.Getenv("QPIX_WEB_ROOT"),
 	}
 	if c.DBDriver == "sqlite" && c.DSN == "" {
 		c.DSN = "data/qpix.db"

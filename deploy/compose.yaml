@@ -1,11 +1,14 @@
 name: qpix
 
 services:
-  backend:
+  qpix:
+    image: ${QPIX_IMAGE:-ghcr.io/qwerto107/qpix:latest}
     build:
       context: ..
-      dockerfile: deploy/backend.Dockerfile
+      dockerfile: Dockerfile
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:${QPIX_WEB_PORT:-8090}:8080"
     environment:
       QPIX_ADDR: 0.0.0.0:8080
       QPIX_ADMIN_USERNAME: ${QPIX_ADMIN_USERNAME:-admin}
@@ -31,16 +34,5 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-  web:
-    build:
-      context: ..
-      dockerfile: deploy/frontend.Dockerfile
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:${QPIX_WEB_PORT:-8090}:8080"
-    depends_on:
-      backend:
-        condition: service_healthy
-
 volumes:
   data:

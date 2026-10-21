@@ -90,6 +90,15 @@
 - 后端以 `CGO_ENABLED=0 -tags=nodynamic` 构建并替换本地预览进程，替换前备份预览目录。此次未重新执行 Linux 交叉编译。
 - 截图：`.cache/preview/upload-custom-menu.png`、`.cache/preview/upload-quality-controls.png`。
 
+## 统一镜像与 CI/CD（2026-10-21）
+
+- `go test -tags=nodynamic ./... -v`、`go vet -tags=nodynamic ./...`、`npm run build` 通过。新增静态资源、SPA 回退、HEAD、缓存、安全头、目录/隐藏文件及符号链接边界测试。
+- actionlint v1.7.12 校验工作流通过；Bash 语法和 9 种标签场景通过，包括 main、正式版本、预发布、自定义版本、保留标签及危险输入拒绝。
+- 独立 SQLite 数据目录、8081 端口启动同一个 Go 服务，验证首页、JS 缓存、分享页面刷新、API/资源 404、健康检查、登录、上传、图片读取与清理。原有 8080 / 5173 预览不变。
+- `CGO_ENABLED=0` 下 Windows 可执行程序和 Linux amd64 / arm64 交叉编译通过；Linux 二进制未在本机运行。
+- Compose YAML 解析后确认仅有一个 qpix 服务。本机没有 Docker；随后远端运行 39601189759 的三数据库检查和统一镜像启动验证通过。
+- 按用户要求，发布流程已精简为单个 build 任务，移除自动数据库矩阵、独立容器测试及重复构建；工作流名称采用 Build and Push Docker Image。原有后端测试代码保留，按需运行。
+
 ## 尚未执行
 
 - 本机没有可用的 PostgreSQL、MySQL 或 Docker，两个数据库的集成用例明确跳过。

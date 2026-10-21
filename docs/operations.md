@@ -11,9 +11,9 @@
 Docker Compose 的卷名为 `qpix_data`。从项目根目录执行，先确保 backups 目录存在：
 
 ```powershell
-docker compose --env-file .env -f deploy/compose.yaml stop backend
+docker compose --env-file .env -f deploy/compose.yaml stop qpix
 docker run --rm -v qpix_data:/source:ro -v "${PWD}/backups:/backup" alpine:3.23 tar czf /backup/qpix-data.tgz -C /source .
-docker compose --env-file .env -f deploy/compose.yaml start backend
+docker compose --env-file .env -f deploy/compose.yaml start qpix
 ```
 
 如需在线数据库备份，可使用 SQLite Backup API 或 VACUUM INTO；它们只保证数据库快照，图片目录仍需采用一致的快照或暂停写入。首版没有后台在线备份按钮。

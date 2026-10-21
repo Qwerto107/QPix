@@ -1,60 +1,74 @@
-name: checks
+name: Build and Push Docker Image
 
 on:
   push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "可选镜像标签；留空使用提交 SHA，手动发布不更新 latest"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: qpix-docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  backend:
+  build:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_DB: qpix_test
-          POSTGRES_USER: qpix
-          POSTGRES_PASSWORD: qpix_test_only
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U qpix -d qpix_test"
-          --health-interval 5s --health-timeout 5s --health-retries 15
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_DATABASE: qpix_test
-          MYSQL_USER: qpix
-          MYSQL_PASSWORD: qpix_test_only
-          MYSQL_ROOT_PASSWORD: root_test_only
-        ports: ["3306:3306"]
-        options: >-
-          --health-cmd "mysqladmin ping -h localhost -proot_test_only"
-          --health-interval 5s --health-timeout 5s --health-retries 20
-    env:
-      CGO_ENABLED: "0"
-      QPIX_TEST_POSTGRES_DSN: "host=127.0.0.1 port=5432 user=qpix password=qpix_test_only dbname=qpix_test sslmode=disable"
-      QPIX_TEST_MYSQL_DSN: "qpix:qpix_test_only@tcp(127.0.0.1:3306)/qpix_test?charset=utf8mb4&parseTime=True&loc=UTC"
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - name: 检出代码
+        uses: actions/checkout@v6
         with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-      - run: go test -tags=nodynamic ./... -v
-        working-directory: backend
-      - run: go vet -tags=nodynamic ./...
-        working-directory: backend
-      - run: go build -tags=nodynamic ./cmd/qpix
-        working-directory: backend
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+          persist-credentials: false
+      - name: 生成镜像标签
+        if: github.event_name != 'pull_request'
+        id: meta
+        env:
+          CUSTOM_VERSION: ${{ inputs.version }}
+        run: bash .github/scripts/image-tags.sh
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-        working-directory: frontend
-      - run: npm run build
-        working-directory: frontend
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # 一次构建前后端；PR 只编译 amd64，发布时生成 amd64 / arm64 统一镜像。
+      - name: 构建并推送镜像
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags || 'qpix:check' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=QPix
+          cache-from: type=gha,scope=qpix
+          cache-to: type=gha,scope=qpix,mode=max
+      - name: 写入发布摘要
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            printf '### QPix 统一镜像\n\n'
+            printf '```text\n%s\n```\n\n' "$IMAGE_TAGS"
+            printf 'Digest: `%s`\n\n' "$IMAGE_DIGEST"
+            printf '架构：linux/amd64、linux/arm64。前后端位于同一镜像，使用同一端口。\n'
+          } >> "$GITHUB_STEP_SUMMARY"
