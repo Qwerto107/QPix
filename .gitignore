@@ -6,3 +6,5 @@
 *.log
 *.exe
 coverage.out
+.release/
+backend/bin/

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"qpix/internal/webui"
 )
 
 func TestUnifiedFrontend(t *testing.T) {
@@ -60,8 +62,8 @@ func TestUnifiedFrontend(t *testing.T) {
 	if _, err := newFrontend(filepath.Join(root, "missing")); err == nil {
 		t.Fatal("缺失前端目录不应成功启动")
 	}
-	if handler, err := newFrontend(""); err != nil || handler != nil {
-		t.Fatal("独立开发 API 时应关闭静态服务")
+	if handler, err := newFrontend(""); err != nil || (handler == nil) != (webui.Files() == nil) {
+		t.Fatal("未指定外置目录时应按构建标签选择内嵌页面或独立 API")
 	}
 	outside := filepath.Join(t.TempDir(), "secret.txt")
 	if err := os.WriteFile(outside, []byte("secret"), 0600); err != nil {

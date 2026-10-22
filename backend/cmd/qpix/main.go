@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,10 +18,44 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
+		if err := healthcheck(); err != nil {
+			slog.Error("健康检查失败", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("服务启动失败", "error", err)
 		os.Exit(1)
 	}
+}
+
+// 无 Shell 的容器直接调用程序探测，不初始化数据库或运行维护任务。
+func healthcheck() error {
+	address := os.Getenv("QPIX_ADDR")
+	if address == "" {
+		address = "127.0.0.1:8080"
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	if host == "" || host == "0.0.0.0" {
+		host = "127.0.0.1"
+	} else if host == "::" {
+		host = "::1"
+	}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
+	response, err := client.Get("http://" + net.JoinHostPort(host, port) + "/api/v1/health")
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("健康检查返回 HTTP %d", response.StatusCode)
+	}
+	return nil
 }
 
 func run() error {

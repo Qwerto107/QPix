@@ -2,13 +2,10 @@ name: qpix
 
 services:
   qpix:
-    image: ${QPIX_IMAGE:-ghcr.io/qwerto107/qpix:latest}
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    image: ghcr.io/qwerto107/qpix:latest
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${QPIX_WEB_PORT:-8090}:8080"
+      - "127.0.0.1:7979:8080"
     environment:
       QPIX_ADDR: 0.0.0.0:8080
       QPIX_ADMIN_USERNAME: ${QPIX_ADMIN_USERNAME:-admin}
@@ -19,15 +16,13 @@ services:
       QPIX_MASTER_KEY_FILE: ${QPIX_MASTER_KEY_FILE:-/data/master.key}
       QPIX_DISABLE_ACCESS_RULES: ${QPIX_DISABLE_ACCESS_RULES:-false}
     volumes:
-      - data:/data
+      - ./data:/data
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/v1/health"]
+      test: ["CMD", "/qpix", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
-volumes:
-  data:

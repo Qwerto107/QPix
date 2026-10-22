@@ -1,139 +1,115 @@
+<div align="center">
+
+<img src="frontend/public/favicon.svg" width="72" height="72" alt="QPix">
+
 # QPix
 
-轻量的个人图床。Go 后端与 Vue 前端分离开发，统一构建为一个镜像、一个服务，支持 SQLite、PostgreSQL、MySQL，默认使用本地磁盘存储。
+**上传、整理，分享你的图片。**
+
+可自托管的轻量图床，用相册整理个人图片，通过直链或受密码、期限保护的链接分享。
+
+[快速部署](#快速部署) · [文档中心](docs/README.md) · [API 参考](docs/api.md) · [下载版本](https://github.com/Qwerto107/QPix/releases)
+
+**Go + Vue** · **SQLite / PostgreSQL / MySQL** · **本地 / S3**
+
+**统一镜像** · Linux amd64 / arm64 / armv6 / armv5 / loong64<br>
+**完整程序** · Linux / Windows amd64 / macOS arm64
+
+</div>
+
+---
+
+## 界面一览
+
+个人图库以相册为入口，图片支持大图标、小图标和详细信息视图。个人空间与系统管理分开，常用操作保持紧凑。
+
+![我的图库：按相册整理图片](docs/assets/library.jpg)
+
+<details>
+<summary><strong>查看更多：上传、预览、权限与系统设置</strong></summary>
+
+![上传图片：选择相册、存储与压缩画质](docs/assets/upload.jpg)
+
+![图片详情：缩放、原始大小和图片信息](docs/assets/image-detail.jpg)
+
+![个人 Token：按相册选择操作权限](docs/assets/token-permissions.jpg)
+
+![系统设置：站点、代理与上传限制](docs/assets/settings.jpg)
+
+截图使用独立演示数据，不包含真实凭据。
+
+</details>
 
 ## 功能
 
-- 管理员创建普通账号、关闭注册、账号停用与密码管理。
-- 个人图库按单层相册展示，自动创建可更换的默认相册；用户只管理本人资源，管理员另有全站管理入口。
-- 每用户容量和单张大小限制，上传并发预占容量。
-- 单张图片分享，支持密码、到期时间与撤销；个人分享与全站管理分开。
-- 拖拽、选择、粘贴和多图上传，最多两个并发，展示进度并支持失败重试。
-- 默认保留原文件，上传时可选原格式压缩或转换 WebP，通过 1–100 画质滑块调整；PNG 压缩保留透明度。独立生成最长边 480px 的 PNG 缩略图。GIF 保留动画，缩略图使用首帧。
-- 多个本地目录和 S3 兼容存储，可测试连接、设为默认、停用；每次上传可以选择存储。
-- 管理 API、上传接口、图片外链分别配置 IP / CIDR 白名单和 Referer 域名规则；相册可覆盖 Referer。
-- 图库搜索、筛选、排序、分页，大图标、小图标和详细信息视图；支持批量移动、复制与删除。
-- 复制直链、Markdown、HTML，支持批量复制。
-- 个人 API Token 支持按相册设置读取、上传、修改、删除、相册管理与分享权限；支持永久或自定义期限，显示上次使用和到期时间，撤销后保留记录并可删除。管理员也可创建个人 Token，所有 Token 均无系统管理权限；个人与全站 Token 管理分别展示。
-- 图片访问域名、图片存储用量和服务端限制展示，侧栏分为图片空间与系统管理。
-- 删除失败记录持久化，启动时及每 10 分钟重试清理。
+| 能力 | 使用方式 |
+| --- | --- |
+| **图片上传** | 拖拽、选择、粘贴与多图队列，展示进度、失败重试，单图一条链接 |
+| **相册整理** | 单层相册、可更换默认相册、搜索与排序、批量移动及删除 |
+| **图片压缩** | 保留原文件、原格式压缩或转 WebP，画质滑块 1–100，保留透明度 |
+| **图片预览** | 大小图标与详细列表，详情支持缩放、100% 原始大小、适应窗口及拖动 |
+| **链接分享** | 直链、Markdown、HTML；单图分享可设置密码、有效期、撤销及删除记录 |
+| **账号与配额** | 统一登录，关闭注册，管理员创建账号，每用户容量和单张上限 |
+| **个人 Token** | 全部本人相册或逐相册授权，设置操作权限、期限、撤销与清理记录 |
+| **多存储** | 多个本地目录和 S3 兼容配置，测试连接、选择默认、上传时切换 |
+| **访问控制** | 管理端及直链分别配置 IP／Referer；上传只校验 IP 与身份，相册覆盖 Referer |
+| **系统管理** | 全站图片、分享、Token、用户及运行设置，与管理员自己的资源分开 |
 
-管理端必须登录，图片受相册权限、分享授权及 IP / Referer 规则约束。新相册默认允许访客凭图片直链访问，可在相册访问设置关闭，支持独立 Referer 策略。支持 JPEG、PNG、GIF、静态 WebP，不接受 SVG。默认单张上限 20 MB、2500 万像素；压缩处理最多 400 万像素，超过时保留原文件。不包含旧兰空数据迁移。
+未指定相册时上传至本人默认相册。新相册默认允许访客凭已知直链查看，可关闭访客访问；不提供公开图库、相册成员授权或相册分享。单图分享默认永久，个人 Token 默认 90 天，均可选常用期限或自定义时间。
 
-原格式压缩对 JPEG / 静态 WebP 按画质重新编码，对普通 8 位 PNG 量化 RGB 色阶并保留逐像素 alpha；转换 WebP 使用有损编码并保留透明度。初始画质 82，仅采用更小的结果。成功后不额外保存原文件；已有图片、GIF、APNG、16 位 PNG、特殊色彩配置均不重编码。选择算法与限制见 [压缩评估](docs/compression.md)。
+## 快速部署
 
-## 目录
+推荐使用统一镜像，一个容器提供页面、API 和图片访问。安装 Docker 与 Compose 后，创建运行目录并下载配置，无需克隆源码。
 
-```text
-backend/
-  cmd/qpix/           服务入口
-  internal/app/       API、会话、图片处理及维护任务
-  internal/config/    环境配置
-  internal/database/  GORM 模型、三种数据库驱动与版本化迁移
-  internal/storage/   本地与 S3 驱动
-  internal/processing/ 压缩与方向处理
-  internal/secret/    存储凭据加密
-frontend/src/         Vue、TypeScript 页面与组件
-Dockerfile           前后端统一多阶段构建
-deploy/              单服务 Docker Compose
-.github/             CI/CD 工作流和镜像验证脚本
-docs/                接口、数据备份与存储扩展说明
+以下权限命令用于 Linux 新建专用目录；已有目录或 Docker Desktop 的权限设置见 [部署指南](docs/deployment.md)。
+
+```sh
+mkdir -p qpix/data
+sudo chown 65532:65532 qpix/data
+sudo chmod 700 qpix/data
+cd qpix
+curl -fL https://raw.githubusercontent.com/Qwerto107/QPix/main/docker-compose.yml -o docker-compose.yml
 ```
 
-## 本地运行
+在 `qpix` 目录新建 `.env`，填写自己的管理员密码（非空，最多 72 字节，不强制最短长度或复杂度）：
 
-需要 Go 1.26+、Node.js 24。依赖版本记录于 go.mod/go.sum 和 package-lock.json。SQLite 使用纯 Go 驱动，不需要 CGO 或额外数据库进程。Vite 仅用于开发与构建，生产前端不需要 Node.js 服务。
-
-在第一个 PowerShell 终端运行：
-
-```powershell
-cd D:\project\QPix\backend
-$env:QPIX_ADMIN_PASSWORD = 'replace-with-a-strong-password'
-go run -tags=nodynamic ./cmd/qpix
+```dotenv
+QPIX_ADMIN_PASSWORD='replace-this-password'
 ```
 
-首次启动前请替换上面的示例密码，不能为空且最多 72 字节，不强制最短长度或复杂度。默认用户名为 `admin`。密码只用于初始化；已有账号不会因为修改环境变量而重置密码。
-
-在第二个终端运行：
-
-```powershell
-cd D:\project\QPix\frontend
-npm ci
-npm run dev
+```sh
+docker compose up -d --pull always
 ```
 
-访问 http://127.0.0.1:5173。开发代理把 `/api/` 和 `/i/` 转发给 `127.0.0.1:8080`，不需要开放跨域。直接运行 Go 不会自动读取 `.env`。
+1. 打开 <http://127.0.0.1:7979>，使用 `admin` 和设置的密码登录。
+2. 按需添加相册与存储，设置站点地址、上传限制及压缩默认值。
+3. 上传图片并复制直链；需要密码或期限时创建单图分享。
 
-## 配置
+密码只用于首次初始化，更改环境变量不会重置已有密码。数据保存在运行目录的 `data/`，端口默认仅本机可访问；固定镜像版本或更改端口时直接编辑 `docker-compose.yml`。Windows、反向代理、数据库与升级见 [部署指南](docs/deployment.md)。
 
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| QPIX_ADDR | 127.0.0.1:8080 | 后端监听地址 |
-| QPIX_ADMIN_USERNAME | admin | 首次初始化管理员名称 |
-| QPIX_ADMIN_PASSWORD | 无 | 首次启动必填，非空且最多 72 字节 |
-| QPIX_DB_DRIVER | sqlite | sqlite、postgres、mysql |
-| QPIX_DB_DSN | data/qpix.db | SQLite 为普通本地文件路径；其他类型必须填写连接串 |
-| QPIX_STORAGE_ROOT | data/uploads | 原图和缩略图目录 |
-| QPIX_MASTER_KEY_FILE | data/master.key | 独立加密密钥，首次自动创建；与数据库一起备份 |
-| QPIX_DISABLE_ACCESS_RULES | false | 临时跳过访问规则以恢复管理权限，恢复后关闭 |
-| QPIX_WEB_ROOT | 空 | 前端构建目录；容器内固定为 /app/web，留空仅提供 API |
+不使用 Docker 时，从 [Releases](https://github.com/Qwerto107/QPix/releases) 下载内嵌前端的完整程序，按 [二进制部署](docs/binary.md) 校验并启动。平台与附件以相应版本实际发布结果为准，历史仅镜像版本不会自动补充二进制。
 
-通过设置页保存的图片域名优先于环境变量；改为空即可使用当前站点。切换数据库配置只会切换连接，不会自动搬迁数据。数据库与存储目录不要放进前端静态目录。首次本地存储配置在数据库中保存绝对路径；之后调整存储请通过“存储管理”，不要只改环境变量。设置代理和外链缓存的说明见 [访问控制](docs/access.md)。
+## 使用边界
 
-PostgreSQL 连接示例：
+- 支持 JPEG、PNG、GIF、静态 WebP，不接受 SVG 或动画 WebP；GIF 保留原动画。
+- 默认单张 20 MiB、2500 万像素，在后台“系统设置 → 上传限制”修改；用户上限与服务器上限取较小者。
+- 默认保留原文件。压缩最多处理 400 万像素，只采用更小的结果；采用后不另存原文件副本，详见 [使用指南](docs/usage.md#压缩细节)。
+- 个人资源按账号隔离。管理员拥有个人空间，系统管理权限仅用于登录会话，个人 Token 不继承全站权限。
+- 原图、缩略图和分享通过 QPix 网关访问；S3 Bucket 保持私有，授权图片与分享不能由 CDN 共享缓存。
+- 当前按单应用实例运行，SQLite 使用本机磁盘；不包含旧图床数据自动迁移、回收站或存储自动迁移。
 
-```text
-QPIX_DB_DRIVER=postgres
-QPIX_DB_DSN=host=127.0.0.1 port=5432 user=qpix password=YOUR_PASSWORD dbname=qpix sslmode=require
-```
+## 文档导航
 
-MySQL 连接示例，数据库须使用 utf8mb4，生产连接按环境配置 TLS：
+| 想了解什么 | 文档 |
+| --- | --- |
+| 相册、上传、预览与分享 | [使用指南](docs/usage.md) |
+| Docker、环境变量、反向代理与升级 | [部署指南](docs/deployment.md) |
+| Linux、Windows、macOS 单文件运行 | [二进制部署](docs/binary.md) |
+| API 请求、参数与返回值 | [API 参考](docs/api.md) |
+| 本地开发、构建与验证 | [开发指南](docs/development.md) |
+| 二进制、多架构镜像与自动 Release | [发布流程](docs/releasing.md) |
+| 版本变化 | [更新记录](docs/changelog.md) |
 
-```text
-QPIX_DB_DRIVER=mysql
-QPIX_DB_DSN=qpix:YOUR_PASSWORD@tcp(127.0.0.1:3306)/qpix?charset=utf8mb4&parseTime=True&loc=UTC
-```
+---
 
-## 容器运行
-
-项目根目录复制 `.env.example` 为 `.env`，填写初始密码及镜像版本。发布镜像为 `ghcr.io/qwerto107/qpix`，包含前后端，支持 amd64 / arm64。首次正式版本发布前可使用 `:dev`；生产推荐固定版本标签。
-
-使用已发布镜像：
-
-```powershell
-docker compose --env-file .env -f deploy/compose.yaml pull
-docker compose --env-file .env -f deploy/compose.yaml up -d --no-build
-```
-
-也可以在本地一次构建前后端：
-
-```powershell
-docker compose --env-file .env -f deploy/compose.yaml up -d --build --pull never
-```
-
-默认访问 http://127.0.0.1:8090。只有一个 `qpix` 服务，由 Go 同时提供页面和 API，默认只绑定宿主机回环地址，方便接入已有 HTTPS 反向代理。数据库和图片存入 `qpix_data` 命名卷。生产环境代理整个站点到同一端口，并在后台“系统设置”配置站点地址、可信代理和 HTTPS Cookie。图片独立域名只需代理 `/i/`（分享图片另使用 `/si/`）。
-
-管理员在“偏好设置 → 上传限制”设置服务器单张上传上限（1–100 MiB），保存后对新上传生效并持久化，重启后继续使用。用户单张上限为 0 时跟随服务器，独立上限与服务器上限取较小值。应用按面板配置限制请求体；外层反向代理须额外放行 multipart 开销，例如 Nginx 使用 `client_max_body_size 101m`。SQLite 采用 WAL 和单连接短事务，仅用于单实例、本机磁盘。PG/MySQL 当前同样按单应用实例使用；多实例迁移调度与分布式限流不在本版范围。
-
-## CI/CD
-
-参考 CloudPaste，前后端只构建一次统一镜像：PR 只构建，不推送；推送 `main` 发布开发镜像 `:dev` 和 `:sha-<12位提交号>`；推送 `vX.Y.Z` 发布 `:X.Y.Z`、`:latest` 和 SHA 标签，并在镜像发布成功后由 Actions 自动创建 GitHub Release。预发布标签不更新 latest，Release 标记为预发布。Actions 支持手动填写自定义镜像标签。构建过程包含前端类型检查与 Go 编译，不重复启动测试数据库和验证容器。
-
-仅发布一个 `ghcr.io/qwerto107/qpix` 多架构镜像，使用 GitHub 内置 `GITHUB_TOKEN`，无需 Docker Hub 凭据。仓库配置、GHCR 可见性、版本发布及升级方法见 [CI/CD 说明](docs/cicd.md)。
-
-## 验证
-
-```powershell
-cd backend
-go test -tags=nodynamic ./... -v
-go vet -tags=nodynamic ./...
-cd ../frontend
-npm ci
-npm run build
-```
-
-默认执行 SQLite 的完整接口测试和存储路径安全测试。若提供 `QPIX_TEST_POSTGRES_DSN`、`QPIX_TEST_MYSQL_DSN`，同一套接口流程也会在对应数据库运行，未配置时明确跳过。测试使用随机表前缀并在结束时删除这些测试表；请使用专用测试数据库。数据库测试按需执行，不纳入镜像发布流程。
-
-账号、配额与分享见 [docs/permissions.md](docs/permissions.md)，接口见 [docs/api.md](docs/api.md)，备份恢复见 [docs/operations.md](docs/operations.md)，存储配置见 [docs/storage.md](docs/storage.md)，实际验证范围见 [docs/verification.md](docs/verification.md)。
-
-运行参数统一在后台保存到数据库并即时生效：站点地址、图片域名、可信代理、HTTPS Cookie、上传大小及像素上限。旧版对应环境变量已移除，不再读取或作为默认值。部署环境只保留监听地址、数据库、初始管理员、初始存储、密钥路径、静态资源目录及访问规则应急开关。
+<div align="center">Go + GORM + Vue · 自托管图片空间</div>
