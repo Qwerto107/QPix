@@ -28,6 +28,8 @@ type imageView struct {
 	database.Image
 	URL          string `json:"url"`
 	ThumbnailURL string `json:"thumbnail_url"`
+	OwnerName    string `json:"owner_name,omitempty"`
+	OwnerRole    string `json:"owner_role,omitempty"`
 	OwnerID      string `json:"owner_id,omitempty"`
 	CanManage    bool   `json:"can_manage"`
 }
@@ -60,7 +62,11 @@ func (a *App) listImages(w http.ResponseWriter, r *http.Request, p principal) {
 	if limit > 100 {
 		limit = 100
 	}
-	q := a.visibleImages(a.db.WithContext(r.Context()).Model(&database.Image{}), p).Where("state = ?", "ready")
+	all, ok := allScope(w, r, p)
+	if !ok {
+		return
+	}
+	q := tokenAlbumQuery(ownerQuery(a.db.WithContext(r.Context()).Model(&database.Image{}), p, all), p, "album_id", tokenRead).Where("state = ?", "ready")
 	if r.URL.Query().Get("mine") == "true" {
 		q = q.Where("user_id = ?", p.User.ID)
 	}
@@ -88,7 +94,7 @@ func (a *App) listImages(w http.ResponseWriter, r *http.Request, p principal) {
 		return
 	}
 	var rows []database.Image
-	if err := q.Order("created_at DESC").Order("id DESC").Offset((page - 1) * limit).Limit(limit).Find(&rows).Error; err != nil {
+	if err := q.Order(recordOrder(r)).Offset((page - 1) * limit).Limit(limit).Find(&rows).Error; err != nil {
 		internal(w, err)
 		return
 	}
@@ -164,14 +170,22 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		fail(w, 400, "图片名称长度必须在 1–255 个字符之间")
 		return
 	}
-	var albumID *string
-	if value := r.FormValue("album_id"); value != "" {
-		if !a.albumWritable(r, p, value) {
-			fail(w, 400, "相册不存在或没有上传权限")
+	value := r.FormValue("album_id")
+	if value == "" {
+		value, err = a.defaultAlbum(r, p.User.ID)
+		if err != nil {
+			internal(w, err)
 			return
 		}
-		albumID = &value
 	}
+	if !requireTokenPermission(w, p, &value, tokenUpload) {
+		return
+	}
+	if !a.albumWritable(r, p, value) {
+		fail(w, 400, "相册不存在或没有上传权限")
+		return
+	}
+	albumID := &value
 	file, err := header.Open()
 	if err != nil {
 		internal(w, err)
@@ -188,8 +202,8 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		fail(w, 415, "仅支持有效的 JPEG、PNG、GIF、静态 WebP 图片")
 		return
 	}
-	if info.Width <= 0 || info.Height <= 0 || int64(info.Width) > a.cfg.MaxPixels/int64(info.Height) {
-		fail(w, 413, "图片像素超出限制（最多 2500 万像素）")
+	if info.Width <= 0 || info.Height <= 0 || int64(info.Width) > a.pixelLimit()/int64(info.Height) {
+		fail(w, 413, "图片像素超出服务器设置的上限")
 		return
 	}
 	decoded, err := processing.Decode(data, format)
@@ -342,18 +356,7 @@ func (a *App) updateImage(w http.ResponseWriter, r *http.Request, p principal) {
 		}
 		updates["name"] = name
 	}
-	if input.AlbumID != nil {
-		if *input.AlbumID == "" {
-			updates["album_id"] = nil
-		} else {
-			if !a.albumWritable(r, p, *input.AlbumID) {
-				fail(w, 400, "相册不存在或没有上传权限")
-				return
-			}
-			updates["album_id"] = *input.AlbumID
-		}
-	}
-	if len(updates) == 0 {
+	if len(updates) == 0 && input.AlbumID == nil {
 		fail(w, 400, "没有可更新的内容")
 		return
 	}
@@ -366,6 +369,32 @@ func (a *App) updateImage(w http.ResponseWriter, r *http.Request, p principal) {
 			internal(w, err)
 		}
 		return
+	}
+	if input.AlbumID != nil {
+		id := *input.AlbumID
+		if id == "" {
+			var err error
+			id, err = a.defaultAlbum(r, row.UserID)
+			if err != nil {
+				internal(w, err)
+				return
+			}
+		}
+		var target database.Album
+		if err := db.First(&target, "id = ? AND user_id = ?", id, row.UserID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				fail(w, 400, "请选择上传者自己的相册")
+			} else {
+				internal(w, err)
+			}
+			return
+		}
+		if row.AlbumID == nil || id != *row.AlbumID {
+			if !requireTokenPermission(w, p, &id, tokenUpload) {
+				return
+			}
+		}
+		updates["album_id"] = id
 	}
 	if err := db.Model(&row).Updates(updates).Error; err != nil {
 		internal(w, err)
@@ -390,6 +419,16 @@ func (a *App) deleteImages(w http.ResponseWriter, r *http.Request, p principal) 
 	if err := a.manageableImages(db, p).Where("id IN ?", input.IDs).Find(&rows).Error; err != nil {
 		internal(w, err)
 		return
+	}
+	if p.Token != nil {
+		ids := map[string]bool{}
+		for _, id := range input.IDs {
+			ids[id] = true
+		}
+		if len(rows) != len(ids) {
+			fail(w, 403, "部分图片不在 Token 删除权限范围内")
+			return
+		}
 	}
 	deleted := 0
 	failed := []string{}
@@ -432,6 +471,10 @@ func (a *App) deleteImages(w http.ResponseWriter, r *http.Request, p principal) 
 }
 
 func (a *App) serveImage(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Authorization") != "" {
+		a.protect(a.serveTokenImage, true)(w, r)
+		return
+	}
 	a.policyMu.RLock()
 	defer a.policyMu.RUnlock()
 	p, err := a.sessionPrincipal(r)
@@ -439,6 +482,10 @@ func (a *App) serveImage(w http.ResponseWriter, r *http.Request) {
 		internal(w, err)
 		return
 	}
+	a.serveStoredImage(w, r, func(db *gorm.DB) *gorm.DB { return a.visibleImages(db, p) })
+}
+
+func (a *App) serveTokenImage(w http.ResponseWriter, r *http.Request, p principal) {
 	a.serveStoredImage(w, r, func(db *gorm.DB) *gorm.DB { return a.visibleImages(db, p) })
 }
 
@@ -453,6 +500,9 @@ func (a *App) serveStoredImage(w http.ResponseWriter, r *http.Request, permitted
 	var row database.Image
 	if err := permitted(a.db.WithContext(r.Context())).First(&row, "id = ? AND state = ?", id, "ready").Error; err != nil {
 		http.NotFound(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/i/") && !a.enforceAlbumAccess(w, r, row.AlbumID) {
 		return
 	}
 	key := row.Key

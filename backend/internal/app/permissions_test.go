@@ -57,53 +57,72 @@ func testPermissionsAndShares(t *testing.T, a *App, admin *testClient, fixture [
 	bob := memberClient(t, admin.server, "bob", "test-user-password")
 	jar, _ := cookiejar.New(nil)
 	guest := &testClient{t: t, server: admin.server, client: &http.Client{Jar: jar}}
+
 	alice.request("GET", "/api/v1/users", nil, 403)
 	alice.request("GET", "/api/v1/storages", nil, 403)
-	alice.request("POST", "/api/v1/albums", map[string]string{"name": "越权"}, 403)
-	alice.request("POST", "/api/v1/shares", map[string]string{"kind": "album", "target_id": "x"}, 403)
-	var opts map[string]any
-	if err := json.Unmarshal(alice.request("GET", "/api/v1/upload-options", nil, 200), &opts); err != nil {
+	for _, path := range []string{"images", "albums", "shares", "tokens", "stats"} {
+		alice.request("GET", "/api/v1/"+path+"?scope=all", nil, 403)
+	}
+	var aliceUser, bobUser database.User
+	if err := a.db.First(&aliceUser, "id = ?", aliceID).Error; err != nil {
 		t.Fatal(err)
 	}
-	encoded, _ := json.Marshal(opts)
-	if strings.Contains(string(encoded), "root") || strings.Contains(string(encoded), "endpoint") || strings.Contains(string(encoded), "credentials") {
-		t.Fatal("上传选项泄露存储配置")
+	if err := a.db.First(&bobUser, "id = ?", bobID).Error; err != nil {
+		t.Fatal(err)
 	}
+	if aliceUser.DefaultAlbumID == "" || bobUser.DefaultAlbumID == "" || aliceUser.DefaultAlbumID == bobUser.DefaultAlbumID {
+		t.Fatal("默认相册未按账号独立创建")
+	}
+	alice.request("DELETE", "/api/v1/albums/"+aliceUser.DefaultAlbumID, map[string]string{"action": "delete"}, 409)
 	var album database.Album
-	if err := json.Unmarshal(admin.request("POST", "/api/v1/albums", map[string]string{"name": "权限相册"}, 201), &album); err != nil {
+	if err := json.Unmarshal(alice.request("POST", "/api/v1/albums", map[string]string{"name": "个人相册"}, 201), &album); err != nil {
 		t.Fatal(err)
 	}
-	admin.request("PUT", "/api/v1/albums/"+album.ID+"/access", map[string]any{"guest_visible": false, "member_ids": []string{aliceID}}, 200)
-	adminImage := decodeImage(admin.upload(fixture, "admin-private.png", album.ID, "", 201))
-	// 访客只能凭图片或分享链接访问，不提供公开相册与图片发现接口。
+	bob.request("PATCH", "/api/v1/albums/"+album.ID, map[string]string{"name": "越权"}, 404)
+	bob.request("PUT", "/api/v1/albums/"+album.ID+"/default", map[string]string{}, 404)
+	bob.request("PUT", "/api/v1/albums/"+album.ID+"/access", map[string]any{"guest_visible": true}, 404)
+	bob.request("DELETE", "/api/v1/albums/"+album.ID, map[string]string{"action": "delete"}, 404)
+	alice.request("PUT", "/api/v1/albums/"+album.ID+"/default", map[string]string{}, 200)
+	aliceImage := decodeImage(alice.upload(fixture, "alice.png", "", "", 201))
+	bobImage := decodeImage(bob.upload(fixture, "bob.png", "", "", 201))
+	var personal, globalPage struct {
+		Items []imageView
+		Total int
+	}
+	if err := json.Unmarshal(admin.request("GET", "/api/v1/images", nil, 200), &personal); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(admin.request("GET", "/api/v1/images?scope=all&limit=100", nil, 200), &globalPage); err != nil {
+		t.Fatal(err)
+	}
+	for _, image := range personal.Items {
+		if image.OwnerID == aliceID || image.OwnerID == bobID {
+			t.Fatal("管理员个人图库包含他人图片")
+		}
+	}
+	if globalPage.Total < personal.Total+2 {
+		t.Fatal("全站图库未包含其他用户图片")
+	}
+	foundOwner := false
+	for _, image := range globalPage.Items {
+		if image.OwnerID == aliceID {
+			foundOwner = image.OwnerName == "alice" && image.OwnerRole == "user"
+		}
+	}
+	if !foundOwner {
+		t.Fatal("全站管理缺少上传人和身份")
+	}
+	admin.request("POST", "/api/v1/images/batch-move", map[string]any{"ids": []string{aliceImage.ID}, "album_id": bobUser.DefaultAlbumID}, 400)
+	admin.request("PATCH", "/api/v1/images/"+aliceImage.ID, map[string]string{"album_id": bobUser.DefaultAlbumID}, 400)
+
+	if aliceImage.AlbumID == nil || *aliceImage.AlbumID != album.ID {
+		t.Fatal("网页上传未使用最新默认相册")
+	}
+	bob.upload(fixture, "越权.png", album.ID, "", 400)
 	for _, path := range []string{"/api/v1/browse/albums", "/api/v1/browse/images"} {
 		guest.request("GET", path, nil, 404)
-		admin.request("GET", path, nil, 404)
 	}
 	guest.request("GET", "/api/v1/albums", nil, 401)
-	guest.request("GET", "/api/v1/images", nil, 401)
-	aliceImage := decodeImage(alice.upload(fixture, "alice-private.png", album.ID, "", 201))
-	bobImage := decodeImage(bob.upload(fixture, "bob-unfiled.png", "", "", 201))
-	guest.request("GET", adminImage.URL, nil, 404)
-	guest.request("HEAD", adminImage.ThumbnailURL, nil, 404)
-	alice.request("GET", adminImage.URL, nil, 200)
-	bob.request("GET", adminImage.URL, nil, 404)
-	alice.request("GET", bobImage.URL, nil, 404)
-	admin.request("GET", bobImage.URL, nil, 200)
-	bob.upload(fixture, "not-member.png", album.ID, "", 400)
-	alice.request("PATCH", "/api/v1/images/"+adminImage.ID, map[string]string{"name": "越权.png"}, 404)
-	alice.request("PATCH", "/api/v1/images/"+aliceImage.ID, map[string]string{"name": "本人图片.png"}, 200)
-	admin.request("PATCH", "/api/v1/images/"+bobImage.ID, map[string]string{"name": "管理员可修改.png"}, 200)
-	var batch struct {
-		Deleted int
-		Failed  []string
-	}
-	if err := json.Unmarshal(bob.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{aliceImage.ID}}, 200), &batch); err != nil {
-		t.Fatal(err)
-	}
-	if batch.Deleted != 0 || len(batch.Failed) != 1 {
-		t.Fatal("批量删除未拒绝越权 ID")
-	}
 	var page struct {
 		Items []imageView
 		Total int
@@ -111,97 +130,171 @@ func testPermissionsAndShares(t *testing.T, a *App, admin *testClient, fixture [
 	if err := json.Unmarshal(bob.request("GET", "/api/v1/images?album_id="+album.ID, nil, 200), &page); err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 0 || len(page.Items) != 0 {
-		t.Fatal("未授权列表泄露数量或记录")
+	if page.Total != 0 {
+		t.Fatal("公开直链不应授予图库发现权限")
 	}
-	admin.request("PUT", "/api/v1/albums/"+album.ID+"/access", map[string]any{"guest_visible": true, "member_ids": []string{aliceID}}, 200)
-	if !bytes.Equal(guest.request("GET", adminImage.URL, nil, 200), fixture) {
-		t.Fatal("访客公开图片内容错误")
-	}
-	guest.request("HEAD", adminImage.ThumbnailURL, nil, 200)
-	guest.request("GET", "/api/v1/browse/images?album_id="+album.ID, nil, 404)
-	if err := json.Unmarshal(bob.request("GET", "/api/v1/images?album_id="+album.ID, nil, 200), &page); err != nil {
+	var listed []database.Album
+	if err := json.Unmarshal(bob.request("GET", "/api/v1/albums", nil, 200), &listed); err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 2 || len(page.Items) != 2 || page.Items[0].CanManage {
-		t.Fatal("公开相册向未授权用户授予了编辑权限或列表错误")
+	if len(listed) != 1 || listed[0].ID != bobUser.DefaultAlbumID {
+		t.Fatal("相册列表包含其他账号的相册")
 	}
-	bob.upload(fixture, "public-not-writable.png", album.ID, "", 400)
-	alice.request("PATCH", "/api/v1/images/"+aliceImage.ID, map[string]string{"album_id": "missing"}, 400)
-	admin.request("PUT", "/api/v1/albums/"+album.ID+"/access", map[string]any{"guest_visible": false, "member_ids": []string{aliceID}}, 200)
-	// 分享是一项独立的只读授权，私有相册的裸链接仍然不可访问。
+	bob.request("PATCH", "/api/v1/images/"+aliceImage.ID, map[string]string{"name": "越权.png"}, 404)
+	bob.request("POST", "/api/v1/images/batch-move", map[string]any{"ids": []string{aliceImage.ID}, "album_id": bobUser.DefaultAlbumID}, 404)
+	alice.request("POST", "/api/v1/images/batch-move", map[string]any{"ids": []string{aliceImage.ID}, "album_id": bobUser.DefaultAlbumID}, 404)
+	guest.request("GET", aliceImage.URL, nil, 200)
+	setPolicy := func(mode string, refs []string, empty bool) {
+		alice.request("PUT", "/api/v1/albums/"+album.ID+"/access", map[string]any{"guest_visible": false, "referer_mode": mode, "referers": refs, "allow_empty_referer": empty}, 200)
+	}
+	setPolicy("inherit", nil, true)
+	guest.request("GET", aliceImage.URL, nil, 404)
+	alice.request("GET", aliceImage.URL, nil, 200)
+	alice.request("POST", "/api/v1/shares", map[string]string{"kind": "album", "target_id": album.ID}, 400)
+	bob.request("POST", "/api/v1/shares", map[string]string{"kind": "image", "target_id": aliceImage.ID}, 404)
 	var share shareView
-	if err := json.Unmarshal(admin.request("POST", "/api/v1/shares", map[string]any{"kind": "album", "target_id": album.ID, "password": "share-secret", "expires_at": time.Now().Add(time.Hour)}, 201), &share); err != nil {
+	if err := json.Unmarshal(alice.request("POST", "/api/v1/shares", map[string]any{"kind": "image", "target_id": aliceImage.ID, "password": "share-secret", "expires_at": time.Now().Add(time.Hour)}, 201), &share); err != nil {
 		t.Fatal(err)
 	}
 	token := strings.TrimPrefix(share.URL, "/s/")
 	path := "/api/v1/public-shares/" + token
-	var locked struct {
+	var shared struct {
 		Locked bool
 		Items  []imageView
 	}
-	if err := json.Unmarshal(guest.request("GET", path, nil, 200), &locked); err != nil {
+	if err := json.Unmarshal(guest.request("GET", path, nil, 200), &shared); err != nil {
 		t.Fatal(err)
 	}
-	if !locked.Locked || len(locked.Items) != 0 {
-		t.Fatal("口令未解锁即泄露图片")
+	if !shared.Locked || len(shared.Items) != 0 {
+		t.Fatal("密码未解锁已泄露图片")
 	}
-	shareURL := "/si/" + token + "/" + adminImage.ID + "." + adminImage.Format
+	shareURL := "/si/" + token + "/" + aliceImage.ID + "." + aliceImage.Format
 	guest.request("GET", shareURL, nil, 404)
 	guest.request("POST", path+"/unlock", map[string]string{"password": "wrong"}, 403)
 	guest.request("POST", path+"/unlock", map[string]string{"password": "share-secret"}, 200)
-	if err := json.Unmarshal(guest.request("GET", path, nil, 200), &locked); err != nil {
+	if err := json.Unmarshal(guest.request("GET", path, nil, 200), &shared); err != nil {
 		t.Fatal(err)
 	}
-	if locked.Locked || len(locked.Items) != 2 || !strings.HasPrefix(locked.Items[0].URL, "/si/") {
-		t.Fatal("分享内容或网关错误")
+	if shared.Locked || len(shared.Items) != 1 || !strings.HasPrefix(shared.Items[0].URL, "/si/") {
+		t.Fatal("单图分享范围错误")
 	}
-	guest.request("GET", shareURL, nil, 200)
+	if !bytes.Equal(guest.request("GET", shareURL, nil, 200), fixture) {
+		t.Fatal("分享图片内容错误")
+	}
 	guest.request("GET", "/si/"+token+"/"+bobImage.ID+"."+bobImage.Format, nil, 404)
-	guest.request("GET", adminImage.URL, nil, 404)
-	guest.request("HEAD", "/si/"+token+"/"+adminImage.ID+"-thumb.png", nil, 200)
+	bob.request("DELETE", "/api/v1/shares/"+share.ID, nil, 404)
+	var sharePage struct {
+		Items []shareView
+		Total int
+	}
+	if err := json.Unmarshal(bob.request("GET", "/api/v1/shares", nil, 200), &sharePage); err != nil {
+		t.Fatal(err)
+	}
+	if sharePage.Total != 0 {
+		t.Fatal("分享列表泄露其他账号数据")
+	}
+	admin.request("GET", "/api/v1/shares?scope=all&limit=1", nil, 200)
+	// 直链应用相册规则；分享及普通账号操作保持独立。
+	setPolicy("custom", []string{"*.allowed.example"}, false)
+	guest.request("GET", shareURL, nil, 200)
+	guest.request("GET", path, nil, 200)
+	alice.request("GET", aliceImage.URL, nil, 403)
+	alice.request("GET", "/api/v1/albums", nil, 200)
+	guest.request("POST", path+"/unlock", map[string]string{"password": "share-secret"}, 200)
+	request, _ := http.NewRequest("HEAD", admin.server.URL+shareURL, nil)
+	request.Header.Set("Referer", "https://a.allowed.example/view")
+	guest.send(request, 200)
+	request, _ = http.NewRequest("HEAD", admin.server.URL+aliceImage.ThumbnailURL, nil)
+	request.Header.Set("Referer", "https://a.allowed.example/view")
+	alice.send(request, 200)
+	request, _ = http.NewRequest("HEAD", admin.server.URL+shareURL, nil)
+	request.Header.Set("Referer", "https://allowed.example/view")
+	guest.send(request, 200)
+	setPolicy("custom", []string{"*.allowed.example"}, true)
+	guest.request("GET", shareURL, nil, 200)
+	a.settingsMu.Lock()
+	originalImages := a.accessRules["images"]
+	global, _ := compileRule(ruleInput{Scope: "images", RefererEnabled: true, Referers: []string{"global.example"}})
+	a.accessRules["images"] = global
+	a.settingsMu.Unlock()
+	guest.request("GET", shareURL, nil, 200)
+	// 管理会话使用管理员规则，以便验证用户相册可以覆盖全局 Referer。
+	admin.request("PUT", "/api/v1/albums/"+album.ID+"/access", map[string]any{"guest_visible": false, "referer_mode": "unrestricted"}, 200)
+	guest.request("GET", shareURL, nil, 200)
+	a.settingsMu.Lock()
+	blockedIP, _ := compileRule(ruleInput{Scope: "images", IPEnabled: true, IPs: []string{"192.0.2.1"}})
+	a.accessRules["images"] = blockedIP
+	a.settingsMu.Unlock()
+	guest.request("GET", shareURL, nil, 200)
+	guest.request("GET", path, nil, 200)
+	alice.request("GET", aliceImage.URL, nil, 403)
+	alice.request("GET", "/api/v1/images", nil, 200)
+	a.settingsMu.Lock()
+	a.accessRules["images"] = originalImages
+	a.settingsMu.Unlock()
+
+	expired := time.Now().UTC().Add(-time.Minute)
+	if err := a.db.Model(&database.Share{}).Where("id = ?", share.ID).Update("expires_at", expired).Error; err != nil {
+		t.Fatal(err)
+	}
+	guest.request("GET", shareURL, nil, 404)
+	if err := a.db.Model(&database.Share{}).Where("id = ?", share.ID).Update("expires_at", time.Now().UTC().Add(time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 移动到其他相册立即使用目标策略，图片归属和容量不改变。
+	alice.request("POST", "/api/v1/images/batch-move", map[string]any{"ids": []string{aliceImage.ID}, "album_id": aliceUser.DefaultAlbumID}, 200)
+	guest.request("GET", aliceImage.URL, nil, 200)
+	alice.request("DELETE", "/api/v1/albums/"+album.ID, map[string]string{"action": "delete"}, 409)
+	alice.request("PUT", "/api/v1/albums/"+aliceUser.DefaultAlbumID+"/default", map[string]string{}, 200)
+	alice.request("DELETE", "/api/v1/albums/"+album.ID, map[string]string{"action": "move", "target_id": aliceUser.DefaultAlbumID}, 200)
+	// Token 列表和撤销按创建者隔离，记录保留，使用时间由认证上传更新。
+	var tokenData struct {
+		Token string
+		Item  database.APIToken
+	}
+	if err := json.Unmarshal(alice.request("POST", "/api/v1/tokens", map[string]string{"name": "个人上传"}, 201), &tokenData); err != nil {
+		t.Fatal(err)
+	}
+	var tokenPage struct {
+		Items []database.APIToken
+		Total int
+	}
+	if err := json.Unmarshal(bob.request("GET", "/api/v1/tokens", nil, 200), &tokenPage); err != nil {
+		t.Fatal(err)
+	}
+	if tokenPage.Total != 0 {
+		t.Fatal("Token 列表泄露其他账号数据")
+	}
+	bob.request("DELETE", "/api/v1/tokens/"+tokenData.Item.ID, nil, 404)
+	tokenImage := decodeImage(guest.upload(fixture, "token-default.png", "", tokenData.Token, 201))
+	if tokenImage.AlbumID == nil || *tokenImage.AlbumID != aliceUser.DefaultAlbumID {
+		t.Fatal("Token 上传未使用默认相册")
+	}
+	var storedToken database.APIToken
+	if err := a.db.First(&storedToken, "id = ?", tokenData.Item.ID).Error; err != nil || storedToken.LastUsedAt == nil {
+		t.Fatal("未记录 Token 使用时间", err)
+	}
+	admin.request("DELETE", "/api/v1/tokens/"+tokenData.Item.ID, nil, 200)
+	guest.upload(fixture, "revoked.png", "", tokenData.Token, 401)
+	if err := a.db.First(&storedToken, "id = ?", tokenData.Item.ID).Error; err != nil || storedToken.RevokedAt == nil {
+		t.Fatal("撤销记录未保留", err)
+	}
 	admin.request("DELETE", "/api/v1/shares/"+share.ID, nil, 200)
-	request, _ := http.NewRequest("GET", admin.server.URL+shareURL, nil)
-	request.Header.Set("If-None-Match", `"`+adminImage.ID+"."+adminImage.Format+`"`)
+	request, _ = http.NewRequest("GET", admin.server.URL+shareURL, nil)
+	request.Header.Set("If-None-Match", `"`+aliceImage.ID+"."+aliceImage.Format+`"`)
 	guest.send(request, 404)
-	guest.request("GET", path, nil, 404)
-	var imageShare shareView
-	offsetExpiry := time.Now().Add(time.Hour).In(time.FixedZone("test+08", 8*60*60))
-	if err := json.Unmarshal(admin.request("POST", "/api/v1/shares", map[string]any{"kind": "image", "target_id": bobImage.ID, "expires_at": offsetExpiry}, 201), &imageShare); err != nil {
-		t.Fatal(err)
+	admin.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{aliceImage.ID, bobImage.ID, tokenImage.ID}}, 200)
+	// 连同图片删除必须立即让直链与分享失效，并清理原图、缩略图。
+	var disposable database.Album
+	json.Unmarshal(alice.request("POST", "/api/v1/albums", map[string]string{"name": "待删除"}, 201), &disposable)
+	image := decodeImage(alice.upload(fixture, "delete.png", disposable.ID, "", 201))
+	alice.request("DELETE", "/api/v1/albums/"+disposable.ID, map[string]string{"action": "delete"}, 200)
+	guest.request("GET", image.URL, nil, 404)
+	var imageCount int64
+	a.db.Model(&database.Image{}).Where("id = ?", image.ID).Count(&imageCount)
+	if imageCount != 0 {
+		t.Fatal("删除相册未清理图片")
 	}
-	var timedShare database.Share
-	if err := a.db.First(&timedShare, "id = ?", imageShare.ID).Error; err != nil {
-		t.Fatal(err)
-	}
-	_, offset := timedShare.ExpiresAt.Zone()
-	if offset != 0 {
-		t.Fatal("分享到期时间没有归一化为 UTC")
-	}
-	imageToken := strings.TrimPrefix(imageShare.URL, "/s/")
-	guest.request("GET", "/si/"+imageToken+"/"+bobImage.ID+"."+bobImage.Format, nil, 200)
-	if err := a.db.Model(&database.Share{}).Where("id = ?", imageShare.ID).Update("expires_at", time.Now().UTC().Add(-time.Second)).Error; err != nil {
-		t.Fatal(err)
-	}
-	guest.request("GET", "/si/"+imageToken+"/"+bobImage.ID+"."+bobImage.Format, nil, 404)
-	var tokenData struct{ Token string }
-	if err := json.Unmarshal(alice.request("POST", "/api/v1/tokens", map[string]string{"name": "普通用户上传"}, 201), &tokenData); err != nil {
-		t.Fatal(err)
-	}
-	tokenImage := decodeImage(guest.upload(fixture, "member-token.png", "", tokenData.Token, 201))
-	alice.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{tokenImage.ID}}, 200)
-	admin.request("PUT", "/api/v1/albums/"+album.ID+"/access", map[string]any{"guest_visible": false, "member_ids": []string{}}, 200)
-	alice.request("GET", aliceImage.URL, nil, 404)
-	alice.request("PATCH", "/api/v1/images/"+aliceImage.ID, map[string]string{"name": "撤销后"}, 404)
-	guest.upload(fixture, "revoked-album-token.png", album.ID, tokenData.Token, 400)
-	// 网络应急开关不能跳过相册权限。
-	a.cfg.DisableAccessRules = true
-	bob.request("GET", adminImage.URL, nil, 404)
-	a.cfg.DisableAccessRules = false
-	admin.request("DELETE", "/api/v1/albums/"+album.ID, nil, 200)
-	alice.request("GET", aliceImage.URL, nil, 200)
-	guest.request("GET", aliceImage.URL, nil, 404)
-	admin.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{adminImage.ID, aliceImage.ID, bobImage.ID}}, 200)
 	// 容量边界按实际保存大小累计；失败上传释放预占，单张限制检查原文件大小。
 	quotaInput := userInput{Enabled: true, QuotaBytes: int64(len(fixture)), MaxFileBytes: int64(len(fixture))}
 	admin.request("PUT", "/api/v1/users/"+aliceID, quotaInput, 200)
@@ -265,14 +358,14 @@ func testPermissionsAndShares(t *testing.T, a *App, admin *testClient, fixture [
 	bob.request("GET", "/api/v1/users", nil, 403)
 	a.settingsMu.Lock()
 	a.accessRules["admin"] = original
-	originalImages := a.accessRules["images"]
+	originalImages = a.accessRules["images"]
 	blockedImages, _ := compileRule(ruleInput{Scope: "images", RefererEnabled: true, Referers: []string{"allowed.example"}})
 	a.accessRules["images"] = blockedImages
 	a.settingsMu.Unlock()
 	bob.request("POST", "/api/v1/member/auth/login", map[string]string{"username": "admin", "password": a.cfg.AdminPassword}, 404)
-	bob.request("GET", "/api/v1/auth/me", nil, 403)
-	guest.request("POST", "/api/v1/auth/login", map[string]string{"username": "bob", "password": "test-user-password"}, 403)
-	guest.request("GET", "/api/v1/auth/me", nil, 401)
+	bob.request("GET", "/api/v1/auth/me", nil, 200)
+	guest.request("POST", "/api/v1/auth/login", map[string]string{"username": "bob", "password": "test-user-password"}, 200)
+	guest.request("GET", "/api/v1/auth/me", nil, 200)
 	guest.request("POST", "/api/v1/auth/login", map[string]string{"username": "admin", "password": a.cfg.AdminPassword}, 200)
 	admin.request("GET", "/api/v1/auth/me", nil, 200)
 	a.settingsMu.Lock()

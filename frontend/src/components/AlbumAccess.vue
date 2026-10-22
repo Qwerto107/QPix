@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { ref } from "vue";
 import Modal from "./Modal.vue";
+import SelectField from "./SelectField.vue";
 import { api } from "../api";
-import type { Album, User } from "../types";
+import type { Album } from "../types";
 import { message } from "../utils";
 const props = defineProps<{ album: Album }>();
 const emit = defineEmits<{
@@ -10,88 +11,81 @@ const emit = defineEmits<{
   saved: [];
   notice: [text: string, error?: boolean];
 }>();
-const users = ref<User[]>([]);
-const loading = ref(true);
-const loaded = ref(false);
-const busy = ref(false);
-const error = ref("");
-const guest = ref(props.album.guest_visible);
-const members = ref([...props.album.member_ids]);
-async function load() {
-  loading.value = true;
-  error.value = "";
-  try {
-    users.value = (await api<User[]>("/users")).filter(
-      (user) => user.role === "user",
-    );
-    loaded.value = true;
-  } catch (reason) {
-    error.value = message(reason);
-  } finally {
-    loading.value = false;
-  }
-}
+const guest = ref(props.album.guest_visible),
+  mode = ref(props.album.referer_mode || "inherit"),
+  refs = ref(props.album.referers.join("\n")),
+  empty = ref(props.album.allow_empty_referer),
+  busy = ref(false),
+  error = ref("");
 async function save() {
   busy.value = true;
   error.value = "";
   try {
     await api(`/albums/${props.album.id}/access`, "PUT", {
       guest_visible: guest.value,
-      member_ids: members.value,
+      referer_mode: mode.value,
+      referers: refs.value
+        .split(/\r?\n/)
+        .map((v) => v.trim())
+        .filter(Boolean),
+      allow_empty_referer: empty.value,
     });
     emit("saved");
-    emit("notice", "相册权限已保存");
+    emit("notice", "相册访问设置已保存");
     emit("close");
-  } catch (reason) {
-    error.value = message(reason);
+  } catch (e) {
+    error.value = message(e);
   } finally {
     busy.value = false;
   }
 }
-onMounted(load);
 </script>
 <template>
-  <Modal
-    :title="`相册权限 · ${album.name}`"
-    :busy="busy"
-    @close="emit('close')"
-  >
-    <form class="modal-body" @submit.prevent="save">
+  <Modal :title="`访问设置 · ${album.name}`" :busy="busy" @close="emit('close')"
+    ><form class="modal-body" @submit.prevent="save">
       <label class="check-field"
         ><input
           v-model="guest"
           type="checkbox"
-        />允许访客通过图片链接访问</label
+        />允许访客通过图片直链访问</label
       >
       <p class="field-help">
-        开启后，未登录访客可通过收到的图片链接查看该图片，不提供相册浏览入口。上传与编辑仍需账号授权。有效分享链接具有独立的只读授权。
+        关闭后，访客不能访问图片直链。单张图片的有效分享链接仍可授予独立访问权限。
       </p>
-      <h3 class="permission-heading">授权用户</h3>
-      <p class="field-help">
-        被选中的用户可浏览、上传和管理本人上传的图片；管理员可管理全部图片。
-      </p>
-      <p v-if="loading" class="muted">正在读取用户…</p>
-      <div v-else class="member-list">
-        <label v-for="user in users" :key="user.id" class="check-field"
-          ><input v-model="members" type="checkbox" :value="user.id" />{{
-            user.username
-          }}<span v-if="!user.enabled" class="muted">已停用</span></label
-        >
-        <p v-if="!users.length" class="field-help">
-          请先在用户管理中创建普通账号。
+      <label class="field-label">Referer 策略</label
+      ><SelectField
+        id="album-referer"
+        label="Referer 策略"
+        v-model="mode"
+        :options="[
+          { value: 'inherit', label: '继承全局规则' },
+          { value: 'custom', label: '自定义域名白名单' },
+          { value: 'unrestricted', label: '不限制 Referer' },
+        ]"
+      />
+      <template v-if="mode === 'custom'"
+        ><label class="field-label" for="album-referer-domains"
+          >允许的域名</label
+        ><textarea
+          id="album-referer-domains"
+          v-model="refs"
+          rows="5"
+          placeholder="example.com&#10;*.example.com"
+          required
+        />
+        <p class="field-help">
+          每行一个域名，不含协议或路径。通配子域名不包含主域名。
         </p>
-      </div>
-      <p v-if="error" class="form-error" role="alert">
-        {{ error }}
-        <button
-          v-if="!users.length"
-          class="text-button"
-          type="button"
-          @click="load"
-        >
-          重试
-        </button>
+        <label class="check-field"
+          ><input v-model="empty" type="checkbox" />允许空
+          Referer（直接打开链接等请求）</label
+        ></template
+      >
+      <p class="field-help">
+        仅对原图和缩略图直链生效，全局图片 IP
+        白名单始终有效。分享通过密码、有效期和撤销状态控制。
       </p>
+      <p v-if="error" class="form-error" role="alert">{{ error }}</p>
       <div class="modal-actions">
         <button
           type="button"
@@ -100,10 +94,10 @@ onMounted(load);
           @click="emit('close')"
         >
           取消</button
-        ><button class="button primary" :disabled="busy || loading || !loaded">
-          {{ busy ? "正在保存…" : "保存权限" }}
+        ><button class="button primary" :disabled="busy">
+          {{ busy ? "正在保存…" : "保存设置" }}
         </button>
       </div>
-    </form>
-  </Modal>
+    </form></Modal
+  >
 </template>

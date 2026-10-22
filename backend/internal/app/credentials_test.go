@@ -74,7 +74,15 @@ func testPasswordPolicyAndTokenExpiry(t *testing.T, a *App, admin *testClient, f
 		t.Fatal(err)
 	}
 	anonymous.upload(fixture, "expired.png", "", custom.Token, 401)
-	member.request("DELETE", "/api/v1/tokens/"+permanent.Item.ID, nil, 200)
+	// 修改本人密码只撤销会话，用户 Token 继续保持原权限。
+	member.request("PUT", "/api/v1/auth/password", map[string]string{"current_password": "2", "new_password": "3"}, 200)
+	member.request("GET", "/api/v1/auth/me", nil, 401)
+	var afterPassword imageView
+	if err := json.Unmarshal(anonymous.upload(fixture, "after-password.png", "", permanent.Token, 201), &afterPassword); err != nil {
+		t.Fatal(err)
+	}
+	admin.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{afterPassword.ID}}, 200)
+	admin.request("DELETE", "/api/v1/tokens/"+permanent.Item.ID, nil, 200)
 	anonymous.upload(fixture, "revoked.png", "", permanent.Token, 401)
-	member.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{image.ID}}, 200)
+	admin.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{image.ID}}, 200)
 }

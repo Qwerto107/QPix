@@ -19,6 +19,11 @@ func (a *App) Maintain(ctx context.Context) {
 	if err := db.Where("expires_at < ?", time.Now().UTC()).Delete(&database.ShareSession{}).Error; err != nil {
 		slog.Error("清理过期分享会话失败", "error", err)
 	}
+	a.cleanupDeleted(ctx)
+}
+
+func (a *App) cleanupDeleted(ctx context.Context) {
+	db := a.db.WithContext(ctx)
 	var pending []database.Image
 	if err := db.Where("state = ?", "deleting").Find(&pending).Error; err != nil {
 		slog.Error("查询待删除图片失败", "error", err)

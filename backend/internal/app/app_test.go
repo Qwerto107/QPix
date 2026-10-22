@@ -18,7 +18,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"gorm.io/gorm/schema"
 	"qpix/internal/config"
@@ -209,12 +208,16 @@ func TestLifecycle(t *testing.T) {
 				t.Fatal("相册或搜索筛选错误")
 			}
 			c.request("PATCH", "/api/v1/images/"+uploaded.ID, map[string]string{"name": "新名称.png"}, 200)
-			c.request("DELETE", "/api/v1/albums/"+album.ID, nil, 200)
-			c.request("GET", uploaded.URL, nil, 200)
-			if err = json.Unmarshal(c.request("GET", "/api/v1/images?album_id=unfiled", nil, 200), &listed); err != nil {
+			var owner database.User
+			if err := db.First(&owner, "role = ?", "admin").Error; err != nil {
 				t.Fatal(err)
 			}
-			if listed.Total != 1 || listed.Items[0].AlbumID != nil {
+			c.request("DELETE", "/api/v1/albums/"+album.ID, map[string]string{"action": "move", "target_id": owner.DefaultAlbumID}, 200)
+			c.request("GET", uploaded.URL, nil, 200)
+			if err = json.Unmarshal(c.request("GET", "/api/v1/images?album_id="+owner.DefaultAlbumID, nil, 200), &listed); err != nil {
+				t.Fatal(err)
+			}
+			if listed.Total != 1 || listed.Items[0].AlbumID == nil || *listed.Items[0].AlbumID != owner.DefaultAlbumID {
 				t.Fatal("删除相册未正确保留图片")
 			}
 			c.request("PATCH", "/api/v1/settings", map[string]string{"public_url": "javascript:alert(1)"}, 400)
@@ -227,30 +230,7 @@ func TestLifecycle(t *testing.T) {
 				t.Fatal("域名设置未保存")
 			}
 			c.request("PATCH", "/api/v1/settings", map[string]string{"public_url": ""}, 200)
-			var token struct {
-				Token string
-				Item  database.APIToken
-			}
-			if err = json.Unmarshal(c.request("POST", "/api/v1/tokens", map[string]any{"name": "客户端", "expires_at": time.Now().UTC().AddDate(0, 0, 30)}, 201), &token); err != nil {
-				t.Fatal(err)
-			}
-			if token.Token == "" {
-				t.Fatal("未生成上传 Token")
-			}
-			var stored database.APIToken
-			if err = db.First(&stored, "id = ?", token.Item.ID).Error; err != nil {
-				t.Fatal(err)
-			}
-			if stored.Hash == token.Token || stored.Hash != digest(token.Token) {
-				t.Fatal("Token 未正确哈希存储")
-			}
-			anonymous := &testClient{t: t, client: &http.Client{}, server: server}
-			anonymous.upload(fixture, "token.png", "", token.Token, 201)
-			req, _ := http.NewRequest("GET", server.URL+"/api/v1/images", nil)
-			req.Header.Set("Authorization", "Bearer "+token.Token)
-			anonymous.send(req, 401)
-			c.request("DELETE", "/api/v1/tokens/"+token.Item.ID, nil, 200)
-			anonymous.upload(fixture, "revoked.png", "", token.Token, 401)
+			c.request("POST", "/api/v1/tokens", map[string]string{"name": "管理员个人上传"}, 201)
 			store.fail.Store(true)
 			c.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{uploaded.ID}}, 200)
 			c.request("GET", uploaded.URL, nil, 404)
@@ -265,12 +245,8 @@ func TestLifecycle(t *testing.T) {
 			testFeatures(t, a, c, root, fixture)
 			testPasswordPolicyAndTokenExpiry(t, a, c, fixture)
 			testPermissionsAndShares(t, a, c, fixture)
-			if err = json.Unmarshal(c.request("POST", "/api/v1/tokens", map[string]any{"name": "改密撤销测试"}, 201), &token); err != nil {
-				t.Fatal(err)
-			}
 			c.request("PUT", "/api/v1/auth/password", map[string]string{"current_password": cfg.AdminPassword, "new_password": "new-test-password-qpix"}, 200)
 			c.request("GET", "/api/v1/auth/me", nil, 401)
-			anonymous.upload(fixture, "old-token.png", "", token.Token, 401)
 			if err = json.Unmarshal(c.request("POST", "/api/v1/auth/login", map[string]string{"username": "admin", "password": "new-test-password-qpix"}, 200), &auth); err != nil {
 				t.Fatal(err)
 			}

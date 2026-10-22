@@ -5,20 +5,20 @@
 ## 功能
 
 - 管理员创建普通账号、关闭注册、账号停用与密码管理。
-- 相册默认私有，按账号授权；访客通过收到的图片或分享链接访问，普通用户管理本人图片，管理员管理全部图片。
+- 个人图库按单层相册展示，自动创建可更换的默认相册；用户只管理本人资源，管理员另有全站管理入口。
 - 每用户容量和单张大小限制，上传并发预占容量。
-- 相册或单图分享，支持密码、到期时间与撤销。
+- 单张图片分享，支持密码、到期时间与撤销；个人分享与全站管理分开。
 - 拖拽、选择、粘贴和多图上传，最多两个并发，展示进度并支持失败重试。
 - 默认保留原文件，上传时可选原格式压缩或转换 WebP，通过 1–100 画质滑块调整；PNG 压缩保留透明度。独立生成最长边 480px 的 PNG 缩略图。GIF 保留动画，缩略图使用首帧。
 - 多个本地目录和 S3 兼容存储，可测试连接、设为默认、停用；每次上传可以选择存储。
-- 管理 API、上传接口、图片外链分别配置 IP / CIDR 白名单和 Referer 域名规则。
-- 图库搜索、分页、网格和列表视图、重命名、相册归类、批量删除。
+- 管理 API、上传接口、图片外链分别配置 IP / CIDR 白名单和 Referer 域名规则；相册可覆盖 Referer。
+- 图库搜索、筛选、排序、分页，大图标、小图标和详细信息视图；支持批量移动、复制与删除。
 - 复制直链、Markdown、HTML，支持批量复制。
-- 有有效期、可撤销的上传 Token，仅允许调用上传接口。
+- 个人 API Token 支持按相册设置读取、上传、修改、删除、相册管理与分享权限；支持永久或自定义期限，显示上次使用和到期时间，撤销后保留记录并可删除。管理员也可创建个人 Token，所有 Token 均无系统管理权限；个人与全站 Token 管理分别展示。
 - 图片访问域名、图片存储用量和服务端限制展示，侧栏分为图片空间与系统管理。
 - 删除失败记录持久化，启动时及每 10 分钟重试清理。
 
-管理端必须登录，图片受相册权限、分享授权及 IP / Referer 规则约束。相册默认私有，未分类图片仅本人和管理员可见。支持 JPEG、PNG、GIF、静态 WebP，不接受 SVG。默认单张上限 20 MB、2500 万像素；压缩处理最多 400 万像素，超过时保留原文件。不包含旧兰空数据迁移。
+管理端必须登录，图片受相册权限、分享授权及 IP / Referer 规则约束。新相册默认允许访客凭图片直链访问，可在相册访问设置关闭，支持独立 Referer 策略。支持 JPEG、PNG、GIF、静态 WebP，不接受 SVG。默认单张上限 20 MB、2500 万像素；压缩处理最多 400 万像素，超过时保留原文件。不包含旧兰空数据迁移。
 
 原格式压缩对 JPEG / 静态 WebP 按画质重新编码，对普通 8 位 PNG 量化 RGB 色阶并保留逐像素 alpha；转换 WebP 使用有损编码并保留透明度。初始画质 82，仅采用更小的结果。成功后不额外保存原文件；已有图片、GIF、APNG、16 位 PNG、特殊色彩配置均不重编码。选择算法与限制见 [压缩评估](docs/compression.md)。
 
@@ -75,12 +75,7 @@ npm run dev
 | QPIX_DB_DSN | data/qpix.db | SQLite 为普通本地文件路径；其他类型必须填写连接串 |
 | QPIX_STORAGE_ROOT | data/uploads | 原图和缩略图目录 |
 | QPIX_MASTER_KEY_FILE | data/master.key | 独立加密密钥，首次自动创建；与数据库一起备份 |
-| QPIX_TRUSTED_PROXIES | 空 | 可信代理 IP/CIDR，逗号分隔；默认忽略 X-Forwarded-For |
 | QPIX_DISABLE_ACCESS_RULES | false | 临时跳过访问规则以恢复管理权限，恢复后关闭 |
-| QPIX_MAX_UPLOAD_MB | 20 | 上传上限启动默认值（MiB），1–100；面板保存后以数据库值为准 |
-| QPIX_SECURE_COOKIE | false | 通过 HTTPS 访问时设置 true |
-| QPIX_APP_URL | 空 | 管理端完整源地址，如 https://qpix.example.com；生产建议明确设置 |
-| QPIX_PUBLIC_URL | 空 | 图片域名；空值使用相对地址 |
 | QPIX_WEB_ROOT | 空 | 前端构建目录；容器内固定为 /app/web，留空仅提供 API |
 
 通过设置页保存的图片域名优先于环境变量；改为空即可使用当前站点。切换数据库配置只会切换连接，不会自动搬迁数据。数据库与存储目录不要放进前端静态目录。首次本地存储配置在数据库中保存绝对路径；之后调整存储请通过“存储管理”，不要只改环境变量。设置代理和外链缓存的说明见 [访问控制](docs/access.md)。
@@ -116,13 +111,13 @@ docker compose --env-file .env -f deploy/compose.yaml up -d --no-build
 docker compose --env-file .env -f deploy/compose.yaml up -d --build --pull never
 ```
 
-默认访问 http://127.0.0.1:8090。只有一个 `qpix` 服务，由 Go 同时提供页面和 API，默认只绑定宿主机回环地址，方便接入已有 HTTPS 反向代理。数据库和图片存入 `qpix_data` 命名卷。生产环境设置 `QPIX_APP_URL` 和 `QPIX_SECURE_COOKIE=true`，代理整个站点到同一端口。图片独立域名只需代理 `/i/`（分享图片另使用 `/si/`）。
+默认访问 http://127.0.0.1:8090。只有一个 `qpix` 服务，由 Go 同时提供页面和 API，默认只绑定宿主机回环地址，方便接入已有 HTTPS 反向代理。数据库和图片存入 `qpix_data` 命名卷。生产环境代理整个站点到同一端口，并在后台“系统设置”配置站点地址、可信代理和 HTTPS Cookie。图片独立域名只需代理 `/i/`（分享图片另使用 `/si/`）。
 
 管理员在“偏好设置 → 上传限制”设置服务器单张上传上限（1–100 MiB），保存后对新上传生效并持久化，重启后继续使用。用户单张上限为 0 时跟随服务器，独立上限与服务器上限取较小值。应用按面板配置限制请求体；外层反向代理须额外放行 multipart 开销，例如 Nginx 使用 `client_max_body_size 101m`。SQLite 采用 WAL 和单连接短事务，仅用于单实例、本机磁盘。PG/MySQL 当前同样按单应用实例使用；多实例迁移调度与分布式限流不在本版范围。
 
 ## CI/CD
 
-参考 CloudPaste，仅保留一个构建发布任务：PR 只构建统一镜像，不推送；推送 `main` 发布开发镜像 `:dev` 和 `:sha-<12位提交号>`；推送 `vX.Y.Z` 发布 `:X.Y.Z`、`:latest` 和 SHA 标签，预发布标签不更新 latest。Actions 支持手动填写自定义镜像标签。构建过程包含前端类型检查与 Go 编译，不重复启动测试数据库和验证容器。
+参考 CloudPaste，前后端只构建一次统一镜像：PR 只构建，不推送；推送 `main` 发布开发镜像 `:dev` 和 `:sha-<12位提交号>`；推送 `vX.Y.Z` 发布 `:X.Y.Z`、`:latest` 和 SHA 标签，并在镜像发布成功后由 Actions 自动创建 GitHub Release。预发布标签不更新 latest，Release 标记为预发布。Actions 支持手动填写自定义镜像标签。构建过程包含前端类型检查与 Go 编译，不重复启动测试数据库和验证容器。
 
 仅发布一个 `ghcr.io/qwerto107/qpix` 多架构镜像，使用 GitHub 内置 `GITHUB_TOKEN`，无需 Docker Hub 凭据。仓库配置、GHCR 可见性、版本发布及升级方法见 [CI/CD 说明](docs/cicd.md)。
 
@@ -140,3 +135,5 @@ npm run build
 默认执行 SQLite 的完整接口测试和存储路径安全测试。若提供 `QPIX_TEST_POSTGRES_DSN`、`QPIX_TEST_MYSQL_DSN`，同一套接口流程也会在对应数据库运行，未配置时明确跳过。测试使用随机表前缀并在结束时删除这些测试表；请使用专用测试数据库。数据库测试按需执行，不纳入镜像发布流程。
 
 账号、配额与分享见 [docs/permissions.md](docs/permissions.md)，接口见 [docs/api.md](docs/api.md)，备份恢复见 [docs/operations.md](docs/operations.md)，存储配置见 [docs/storage.md](docs/storage.md)，实际验证范围见 [docs/verification.md](docs/verification.md)。
+
+运行参数统一在后台保存到数据库并即时生效：站点地址、图片域名、可信代理、HTTPS Cookie、上传大小及像素上限。旧版对应环境变量已移除，不再读取或作为默认值。部署环境只保留监听地址、数据库、初始管理员、初始存储、密钥路径、静态资源目录及访问规则应急开关。

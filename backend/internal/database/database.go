@@ -155,8 +155,10 @@ func migratePermissions(db *gorm.DB) error {
 
 func migrateTokenExpiration(db *gorm.DB) error {
 	var count int64
-	if err := db.Model(&SchemaMigration{}).Where("version = ?", 4).Count(&count).Error; err != nil || count > 0 {
+	if err := db.Model(&SchemaMigration{}).Where("version = ?", 4).Count(&count).Error; err != nil {
 		return err
+	} else if count > 0 {
+		return migratePersonalSpace(db)
 	}
 	// NULL 表示永久有效；仅修改到期列的可空属性，保留已有 Token 的期限和哈希。
 	columns, err := db.Migrator().ColumnTypes(&APIToken{})
@@ -172,5 +174,76 @@ func migrateTokenExpiration(db *gorm.DB) error {
 			}
 		}
 	}
-	return db.Create(&SchemaMigration{Version: 4, AppliedAt: time.Now().UTC()}).Error
+	if err := db.Create(&SchemaMigration{Version: 4, AppliedAt: time.Now().UTC()}).Error; err != nil {
+		return err
+	}
+	return migratePersonalSpace(db)
+}
+
+// 逐列迁移可重复执行，兼容 MySQL 非事务 DDL，保留现有图片和凭据。
+func migratePersonalSpace(db *gorm.DB) error {
+	var count int64
+	if err := db.Model(&SchemaMigration{}).Where("version = ?", 5).Count(&count).Error; err != nil {
+		return err
+	} else if count > 0 {
+		return migrateTokenPermissions(db)
+	}
+	for _, item := range []struct {
+		model  any
+		fields []string
+	}{
+		{&User{}, []string{"DefaultAlbumID"}}, {&Album{}, []string{"RefererMode", "Referers", "AllowEmptyReferer"}},
+		{&Share{}, []string{"UserID"}}, {&APIToken{}, []string{"LastUsedAt", "RevokedAt"}},
+	} {
+		for _, field := range item.fields {
+			if !db.Migrator().HasColumn(item.model, field) {
+				if err := db.Migrator().AddColumn(item.model, field); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	// 历史分享仅由管理员创建；相册分享停用，单图分享保留原链接。
+	var admin User
+	if err := db.Where("role = ?", "admin").Order("created_at ASC").First(&admin).Error; err != nil && err != gorm.ErrRecordNotFound {
+		return err
+	}
+	if admin.ID != "" {
+		if err := db.Model(&Share{}).Where("user_id IS NULL OR user_id = ?", "").Update("user_id", admin.ID).Error; err != nil {
+			return err
+		}
+	}
+	if err := db.Model(&Share{}).Where("kind = ? AND revoked_at IS NULL", "album").Update("revoked_at", time.Now().UTC()).Error; err != nil {
+		return err
+	}
+	if err := db.Where("1 = 1").Delete(&AlbumMember{}).Error; err != nil {
+		return err
+	}
+	if err := db.Create(&SchemaMigration{Version: 5, AppliedAt: time.Now().UTC()}).Error; err != nil {
+		return err
+	}
+	return migrateTokenPermissions(db)
+}
+
+// 旧用户 Token 保持全部本人相册仅上传；管理员 Token 停用但保留记录。
+func migrateTokenPermissions(db *gorm.DB) error {
+	var count int64
+	if err := db.Model(&SchemaMigration{}).Where("version = ?", 6).Count(&count).Error; err != nil || count > 0 {
+		return err
+	}
+	if !db.Migrator().HasColumn(&APIToken{}, "Authorization") {
+		if err := db.Migrator().AddColumn(&APIToken{}, "Authorization"); err != nil {
+			return err
+		}
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&APIToken{}).Where("authorization IS NULL OR authorization = ?", "").Update("authorization", `{"all_albums":true,"permissions":["upload"],"albums":[]}`).Error; err != nil {
+			return err
+		}
+		admins := tx.Model(&User{}).Select("id").Where("role = ?", "admin")
+		if err := tx.Model(&APIToken{}).Where("user_id IN (?) AND revoked_at IS NULL", admins).Update("revoked_at", time.Now().UTC()).Error; err != nil {
+			return err
+		}
+		return tx.Create(&SchemaMigration{Version: 6, AppliedAt: time.Now().UTC()}).Error
+	})
 }

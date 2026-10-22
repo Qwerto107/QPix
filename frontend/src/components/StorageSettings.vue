@@ -1,15 +1,54 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { HardDrive, Plus, Cloud, LoaderCircle } from "@lucide/vue";
 import Modal from "./Modal.vue";
+import SelectField from "./SelectField.vue";
 import { api } from "../api";
 import type { StorageProfile } from "../types";
-import { message } from "../utils";
+import { message, preference, savePreference } from "../utils";
 const emit = defineEmits<{
   changed: [];
   notice: [text: string, error?: boolean];
 }>();
 const rows = ref<StorageProfile[]>([]);
+const search = ref(""),
+  statusFilter = ref(""),
+  sortOrder = ref(preference("storages.sort", "asc", ["asc", "desc"])),
+  page = ref(1),
+  pageLimit = ref(preference("storages.limit", "20", ["20", "50", "100"]));
+const filtered = computed(() =>
+  rows.value
+    .filter(
+      (row) =>
+        row.name
+          .toLocaleLowerCase()
+          .includes(search.value.toLocaleLowerCase()) &&
+        (!statusFilter.value ||
+          (row.enabled ? "enabled" : "disabled") === statusFilter.value),
+    )
+    .sort((a, b) =>
+      sortOrder.value === "asc"
+        ? a.name.localeCompare(b.name, "zh-CN")
+        : b.name.localeCompare(a.name, "zh-CN"),
+    ),
+);
+const pages = computed(() =>
+  Math.max(1, Math.ceil(filtered.value.length / Number(pageLimit.value))),
+);
+const displayed = computed(() =>
+  filtered.value.slice(
+    (page.value - 1) * Number(pageLimit.value),
+    page.value * Number(pageLimit.value),
+  ),
+);
+watch([search, statusFilter, sortOrder, pageLimit], () => {
+  page.value = 1;
+  savePreference("storages.limit", pageLimit.value);
+  savePreference("storages.sort", sortOrder.value);
+});
+watch(pages, (value) => {
+  if (page.value > value) page.value = value;
+});
 const loading = ref(true);
 const error = ref("");
 const action = ref("");
@@ -138,6 +177,31 @@ onMounted(load);
         <Plus :size="17" />添加存储
       </button>
     </div>
+    <div class="compact-toolbar">
+      <input
+        v-model="search"
+        class="list-search"
+        placeholder="搜索名称"
+        aria-label="搜索名称"
+      /><SelectField
+        id="config-status"
+        label="筛选状态"
+        v-model="statusFilter"
+        :options="[
+          { value: '', label: '全部状态' },
+          { value: 'enabled', label: '已启用' },
+          { value: 'disabled', label: '已停用' },
+        ]"
+      /><SelectField
+        id="config-sort"
+        label="名称排序"
+        v-model="sortOrder"
+        :options="[
+          { value: 'asc', label: '名称 ↑' },
+          { value: 'desc', label: '名称 ↓' },
+        ]"
+      />
+    </div>
     <p v-if="loading" class="muted">正在读取存储…</p>
     <p v-if="error" class="form-error" role="alert">
       {{ error }} <button class="text-button" @click="load">重试</button>
@@ -169,7 +233,7 @@ onMounted(load);
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in rows" :key="row.id">
+          <tr v-for="row in displayed" :key="row.id">
             <th scope="row">
               <span class="management-name-with-icon">
                 <component
@@ -239,6 +303,25 @@ onMounted(load);
           </tr>
         </tbody>
       </table>
+    </div>
+    <p v-if="!loading && !filtered.length" class="field-help">
+      暂无符合条件的记录。
+    </p>
+    <div class="compact-pagination">
+      <span>共 {{ filtered.length }} 条</span
+      ><SelectField
+        id="config-limit"
+        label="每页数量"
+        v-model="pageLimit"
+        :options="
+          ['20', '50', '100'].map((v) => ({ value: v, label: `${v} 条／页` }))
+        "
+      /><button class="button compact" :disabled="page <= 1" @click="page--">
+        上一页</button
+      ><span>{{ page }} / {{ pages }}</span
+      ><button class="button compact" :disabled="page >= pages" @click="page++">
+        下一页
+      </button>
     </div>
     <p class="field-help storage-footnote">
       S3 Bucket 请保持私有。图片通过 QPix

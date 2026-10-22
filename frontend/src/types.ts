@@ -1,4 +1,6 @@
 export interface User {
+  default_album_id: string;
+  created_at: string;
   id: string;
   username: string;
   role: "admin" | "user";
@@ -8,6 +10,8 @@ export interface User {
   used_bytes?: number;
 }
 export interface ImageItem {
+  owner_name?: string;
+  owner_role?: "admin" | "user";
   owner_id?: string;
   can_manage: boolean;
   id: string;
@@ -27,14 +31,38 @@ export interface ImageItem {
 }
 export interface Album {
   guest_visible: boolean;
-  member_ids: string[];
+  owner_id: string;
+  owner_name: string;
+  owner_role: "admin" | "user";
+  is_default: boolean;
+  referer_mode: "inherit" | "custom" | "unrestricted";
+  referers: string[];
+  allow_empty_referer: boolean;
   can_upload: boolean;
   id: string;
   name: string;
   count: number;
   created_at: string;
 }
+export type TokenPermission =
+  | "read"
+  | "upload"
+  | "edit"
+  | "delete"
+  | "albums"
+  | "share";
+export interface TokenAuthorization {
+  all_albums: boolean;
+  permissions: TokenPermission[];
+  albums: { album_id: string; permissions: TokenPermission[] }[];
+}
 export interface APIToken {
+  authorization: TokenAuthorization;
+  owner_id: string;
+  owner_name: string;
+  owner_role: "admin" | "user";
+  last_used_at: string | null;
+  revoked_at: string | null;
   id: string;
   name: string;
   prefix: string;
@@ -50,6 +78,9 @@ export interface Stats {
   pending_deletions: number;
 }
 export interface Settings {
+  app_url: string;
+  secure_cookie: boolean;
+  trusted_proxies: string[];
   public_url: string;
   max_upload_bytes: number;
   max_pixels: number;
@@ -108,7 +139,10 @@ export interface UploadOptions {
 
 export interface ShareItem {
   id: string;
-  kind: "album" | "image";
+  kind: "image";
+  owner_id: string;
+  owner_name: string;
+  owner_role: "admin" | "user";
   target_id: string;
   title: string;
   url: string;
@@ -116,4 +150,11 @@ export interface ShareItem {
   expires_at: string | null;
   revoked_at: string | null;
   created_at: string;
+}
+
+export interface RecordPage<T> {
+  items: T[];
+  total: number;
+  page: number;
+  limit: number;
 }

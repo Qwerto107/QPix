@@ -34,11 +34,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 角色来自数据库，验证密码后再应用对应网络规则，通过后才创建会话。
-	scope := "images"
-	if user.Role == "admin" {
-		scope = "admin"
-	}
-	if !a.enforceScope(w, r, scope) {
+	if user.Role == "admin" && !a.enforceScope(w, r, "admin") {
 		return
 	}
 	raw := randomHex(32)
@@ -63,7 +59,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) setCookie(w http.ResponseWriter, value string, maxAge int) {
-	http.SetCookie(w, &http.Cookie{Name: "qpix_session", Value: value, Path: "/", HttpOnly: true, Secure: a.cfg.SecureCookie, SameSite: http.SameSiteStrictMode, MaxAge: maxAge})
+	http.SetCookie(w, &http.Cookie{Name: "qpix_session", Value: value, Path: "/", HttpOnly: true, Secure: a.cookiesSecure(), SameSite: http.SameSiteStrictMode, MaxAge: maxAge})
 }
 func (a *App) me(w http.ResponseWriter, r *http.Request, p principal) {
 	respond(w, 200, map[string]any{"user": p.User, "csrf_token": p.Session.CSRF})
@@ -109,7 +105,7 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request, p principal
 		if err := tx.Where("user_id = ?", p.User.ID).Delete(&database.Session{}).Error; err != nil {
 			return err
 		}
-		return tx.Where("user_id = ?", p.User.ID).Delete(&database.APIToken{}).Error
+		return nil
 	})
 	if err != nil {
 		internal(w, err)

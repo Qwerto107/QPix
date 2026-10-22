@@ -9,58 +9,69 @@ import (
 	"qpix/internal/database"
 )
 
-func (a *App) memberAlbums(db *gorm.DB, userID string) *gorm.DB {
-	return db.Model(&database.AlbumMember{}).Select("album_id").Where("user_id = ?", userID)
+// 列表默认只展示本人资源；全站范围必须显式选择，并再次校验管理员身份。
+func allScope(w http.ResponseWriter, r *http.Request, p principal) (bool, bool) {
+	all := r.URL.Query().Get("scope") == "all"
+	if all && (p.User.Role != "admin" || p.Token != nil) {
+		fail(w, 403, "仅管理员可访问全站资源")
+		return false, false
+	}
+	return all, true
 }
-
+func ownerQuery(db *gorm.DB, p principal, all bool) *gorm.DB {
+	if !all {
+		return db.Where("user_id = ?", p.User.ID)
+	}
+	return db
+}
 func (a *App) visibleAlbums(db *gorm.DB, p principal) *gorm.DB {
-	query := db.Model(&database.Album{})
-	if p.User.Role == "admin" {
-		return query
+	q := db.Model(&database.Album{})
+	// 管理员的全站权限仅适用于登录会话，个人 Token 始终受本人相册授权约束。
+	if p.User.Role == "admin" && p.Token == nil {
+		return q
 	}
-	if p.User.ID == "" {
-		return query.Where("guest_visible = ?", true)
-	}
-	return query.Where("guest_visible = ? OR id IN (?)", true, a.memberAlbums(db, p.User.ID))
+	return tokenAlbumQuery(q.Where("user_id = ?", p.User.ID), p, "id", p.TokenOperation)
 }
-
 func (a *App) visibleImages(db *gorm.DB, p principal) *gorm.DB {
-	if p.User.Role == "admin" {
+	if p.User.Role == "admin" && p.Token == nil {
 		return db
 	}
-	albums := a.visibleAlbums(a.db.WithContext(db.Statement.Context), p).Select("id")
+	if p.Token != nil {
+		return tokenAlbumQuery(db.Where("user_id = ?", p.User.ID), p, "album_id", tokenRead)
+	}
+	public := a.db.WithContext(db.Statement.Context).Model(&database.Album{}).Select("id").Where("guest_visible = ?", true)
 	if p.User.ID == "" {
-		return db.Where("album_id IN (?)", albums)
+		return db.Where("album_id IN (?)", public)
 	}
-	return db.Where("(album_id IN (?) OR (album_id IS NULL AND user_id = ?))", albums, p.User.ID)
+	return db.Where("(user_id = ? OR album_id IN (?))", p.User.ID, public)
 }
-
 func (a *App) manageableImages(db *gorm.DB, p principal) *gorm.DB {
-	if p.User.Role == "admin" {
+	if p.User.Role == "admin" && p.Token == nil {
 		return db
 	}
-	return db.Where("user_id = ? AND (album_id IS NULL OR album_id IN (?))", p.User.ID, a.memberAlbums(a.db.WithContext(db.Statement.Context), p.User.ID))
+	return tokenAlbumQuery(db.Where("user_id = ?", p.User.ID), p, "album_id", p.TokenOperation)
 }
-
 func (a *App) albumWritable(r *http.Request, p principal, id string) bool {
-	if id == "" {
-		return p.User.ID != ""
-	}
-	db := a.db.WithContext(r.Context())
-	query := db.Model(&database.Album{}).Where("id = ?", id)
-	if p.User.Role != "admin" {
-		query = query.Where("id IN (?)", a.memberAlbums(db, p.User.ID))
-	}
-	var count int64
-	return query.Count(&count).Error == nil && count == 1
+	q := a.db.WithContext(r.Context()).Model(&database.Album{}).Where("id = ?", id)
+	q = q.Where("user_id = ?", p.User.ID)
+	var n int64
+	return p.allowsToken(&id, tokenUpload) && q.Count(&n).Error == nil && n == 1
 }
 
 func (a *App) viewFor(row database.Image, p principal) imageView {
 	view := a.imageView(row)
 	var count int64
 	view.CanManage = a.manageableImages(a.db.Model(&database.Image{}), p).Where("id = ?", row.ID).Count(&count).Error == nil && count == 1
+	if p.Token != nil {
+		view.CanManage = p.allowsToken(row.AlbumID, tokenEdit) || p.allowsToken(row.AlbumID, tokenDelete)
+	}
 	if p.User.Role == "admin" || p.User.ID == row.UserID {
 		view.OwnerID = row.UserID
+		var owner database.User
+		if a.db.Select("username", "role").First(&owner, "id = ?", row.UserID).Error == nil {
+			view.OwnerName = owner.Username
+			view.OwnerRole = owner.Role
+		}
 	}
 	return view
 }

@@ -5,7 +5,6 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 )
 
 type Config struct {
@@ -23,7 +22,6 @@ func Load() (Config, error) {
 	c := Config{
 		Address: env("QPIX_ADDR", "127.0.0.1:8080"), DBDriver: env("QPIX_DB_DRIVER", "sqlite"),
 		DSN: os.Getenv("QPIX_DB_DSN"), StorageRoot: env("QPIX_STORAGE_ROOT", "data/uploads"),
-		PublicURL: strings.TrimRight(os.Getenv("QPIX_PUBLIC_URL"), "/"), AppURL: strings.TrimRight(os.Getenv("QPIX_APP_URL"), "/"),
 		AdminUsername: env("QPIX_ADMIN_USERNAME", "admin"), AdminPassword: os.Getenv("QPIX_ADMIN_PASSWORD"),
 		MaxUploadBytes: 20 << 20, MaxPixels: 25_000_000,
 		MasterKeyFile: env("QPIX_MASTER_KEY_FILE", "data/master.key"),
@@ -39,34 +37,10 @@ func Load() (Config, error) {
 		return c, fmt.Errorf("请设置 QPIX_DB_DSN")
 	}
 	var err error
-	if value := os.Getenv("QPIX_TRUSTED_PROXIES"); value != "" {
-		for _, item := range strings.Split(value, ",") {
-			c.TrustedProxies = append(c.TrustedProxies, strings.TrimSpace(item))
-		}
-	}
 	if value := os.Getenv("QPIX_DISABLE_ACCESS_RULES"); value != "" {
 		c.DisableAccessRules, err = strconv.ParseBool(value)
 		if err != nil {
 			return c, fmt.Errorf("QPIX_DISABLE_ACCESS_RULES 必须是布尔值")
-		}
-	}
-	if raw := os.Getenv("QPIX_MAX_UPLOAD_MB"); raw != "" {
-		var n int64
-		n, err = strconv.ParseInt(raw, 10, 64)
-		if err != nil || n < 1 || n > 100 {
-			return c, fmt.Errorf("QPIX_MAX_UPLOAD_MB 必须在 1 到 100 之间")
-		}
-		c.MaxUploadBytes = n << 20
-	}
-	if raw := os.Getenv("QPIX_SECURE_COOKIE"); raw != "" {
-		c.SecureCookie, err = strconv.ParseBool(raw)
-		if err != nil {
-			return c, fmt.Errorf("QPIX_SECURE_COOKIE 必须是布尔值")
-		}
-	}
-	for _, value := range []string{c.PublicURL, c.AppURL} {
-		if err = ValidateURL(value); err != nil {
-			return c, err
 		}
 	}
 	return c, nil

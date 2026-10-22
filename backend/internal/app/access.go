@@ -43,6 +43,9 @@ var domainPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:
 
 func compileRule(input ruleInput) (accessRule, error) {
 	result := accessRule{input: input}
+	if input.Scope == "upload" && (input.RefererEnabled || len(input.Referers) > 0) {
+		return result, errors.New("上传接口只支持 IP 限制，不支持 Referer 配置")
+	}
 	if input.Scope != "admin" && input.Scope != "upload" && input.Scope != "images" {
 		return result, errors.New("规则范围必须是 admin、upload 或 images")
 	}
@@ -134,6 +137,8 @@ func (rule accessRule) allows(address netip.Addr, referer string) bool {
 }
 
 func (a *App) trusted(address netip.Addr) bool {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
 	for _, network := range a.trustedProxies {
 		if network.Contains(address) {
 			return true
@@ -175,13 +180,16 @@ func requestScope(r *http.Request) string {
 	if strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
 		return ""
 	}
-	if strings.HasPrefix(r.URL.Path, "/i/") || strings.HasPrefix(r.URL.Path, "/si/") || strings.HasPrefix(r.URL.Path, "/api/v1/public-shares/") {
+	if strings.HasPrefix(r.URL.Path, "/si/") || strings.HasPrefix(r.URL.Path, "/api/v1/public-shares/") {
+		return ""
+	}
+	if strings.HasPrefix(r.URL.Path, "/i/") {
 		return "images"
 	}
 	if r.URL.Path == "/api/v1/images" && r.Method == "POST" {
 		return "upload"
 	}
-	for _, path := range []string{"/api/v1/images", "/api/v1/albums", "/api/v1/tokens", "/api/v1/stats", "/api/v1/upload-options"} {
+	for _, path := range []string{"/api/v1/images", "/api/v1/albums", "/api/v1/tokens", "/api/v1/shares", "/api/v1/stats", "/api/v1/upload-options"} {
 		if r.URL.Path == path || strings.HasPrefix(r.URL.Path, path+"/") {
 			return ""
 		}
@@ -198,6 +206,18 @@ func (a *App) enforceAccess(w http.ResponseWriter, r *http.Request) bool {
 	}
 	scope := requestScope(r)
 	if scope == "" {
+		return true
+	}
+	// 图片查到所属相册后才计算 Referer 覆盖，最外层保留全局 IP 限制。
+	if strings.HasPrefix(r.URL.Path, "/i/") {
+		a.settingsMu.RLock()
+		rule := a.accessRules["images"]
+		a.settingsMu.RUnlock()
+		rule.input.RefererEnabled = false
+		if !rule.allows(a.requesterIP(r), r.Header.Get("Referer")) {
+			fail(w, 403, "请求不满足图片 IP 规则")
+			return false
+		}
 		return true
 	}
 	return a.enforceScope(w, r, scope)
@@ -222,12 +242,12 @@ func (a *App) enforceScope(w http.ResponseWriter, r *http.Request, scope string)
 
 func (a *App) listAccess(w http.ResponseWriter, r *http.Request, p principal) {
 	a.settingsMu.RLock()
-	defer a.settingsMu.RUnlock()
 	items := []ruleInput{}
 	for _, scope := range []string{"admin", "upload", "images"} {
 		rule := a.accessRules[scope].input
 		items = append(items, rule)
 	}
+	a.settingsMu.RUnlock()
 	address := a.requesterIP(r)
 	ip := ""
 	if address.IsValid() {

@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"qpix/internal/config"
 	"strconv"
 
 	"qpix/internal/database"
@@ -28,7 +30,7 @@ func (a *App) initRuntime() error {
 	for _, raw := range a.cfg.TrustedProxies {
 		prefix, err := parseNetwork(raw)
 		if err != nil {
-			return errors.New("QPIX_TRUSTED_PROXIES 包含无效 IP 或网段")
+			return errors.New("可信代理包含无效 IP 或网段")
 		}
 		a.trustedProxies = append(a.trustedProxies, prefix)
 	}
@@ -70,6 +72,30 @@ func (a *App) initRuntime() error {
 	}
 	for _, setting := range settings {
 		switch setting.Key {
+		case "app_url":
+			if err = config.ValidateURL(setting.Value); err != nil {
+				return err
+			}
+			a.appURL = setting.Value
+		case "secure_cookie":
+			a.secureCookie, err = strconv.ParseBool(setting.Value)
+			if err != nil {
+				return err
+			}
+		case "max_pixels":
+			a.maxPixels, err = strconv.ParseInt(setting.Value, 10, 64)
+			if err != nil || !validMaxPixels(a.maxPixels) {
+				return errors.New("图片像素上限无效")
+			}
+		case "trusted_proxies":
+			var values []string
+			if err = json.Unmarshal([]byte(setting.Value), &values); err != nil {
+				return err
+			}
+			a.trustedProxies, err = parseTrustedProxies(values)
+			if err != nil {
+				return err
+			}
 		case "max_upload_bytes":
 			limit, parseErr := strconv.ParseInt(setting.Value, 10, 64)
 			if parseErr != nil || !validUploadLimit(limit) {
@@ -106,6 +132,10 @@ func (a *App) initRuntime() error {
 		if err = json.Unmarshal([]byte(row.Referers), &input.Referers); err != nil {
 			return err
 		}
+		// 上传仅校验身份和 IP；忽略旧版本遗留的 Referer 设置。
+		if input.Scope == "upload" {
+			input.RefererEnabled, input.AllowEmptyReferer, input.Referers = false, false, nil
+		}
 		rule, err := compileRule(input)
 		if err != nil {
 			return err
@@ -113,6 +143,43 @@ func (a *App) initRuntime() error {
 		a.accessRules[row.Scope] = rule
 	}
 	return nil
+}
+
+func validMaxPixels(value int64) bool { return value >= 1_000_000 && value <= 100_000_000 }
+
+func parseTrustedProxies(values []string) ([]netip.Prefix, error) {
+	if len(values) > 200 {
+		return nil, errors.New("可信代理最多 200 项")
+	}
+	result := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		prefix, err := parseNetwork(value)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, prefix)
+	}
+	normalized := make([]string, 0, len(result))
+	for _, prefix := range result {
+		normalized = append(normalized, prefix.String())
+	}
+	raw, _ := json.Marshal(normalized)
+	if len(raw) > 2048 {
+		return nil, errors.New("可信代理列表过长，JSON 内容最多 2048 字节")
+	}
+	return result, nil
+}
+
+func (a *App) cookiesSecure() bool {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.secureCookie
+}
+
+func (a *App) pixelLimit() int64 {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.maxPixels
 }
 
 func validUploadLimit(limit int64) bool {

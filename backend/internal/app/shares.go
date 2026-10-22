@@ -18,14 +18,11 @@ type shareView struct {
 	URL         string `json:"url"`
 	HasPassword bool   `json:"has_password"`
 	Title       string `json:"title"`
+	OwnerName   string `json:"owner_name"`
+	OwnerRole   string `json:"owner_role"`
 }
 
 func (a *App) shareTitle(db *gorm.DB, row database.Share) (string, error) {
-	if row.Kind == "album" {
-		var album database.Album
-		err := db.First(&album, "id = ?", row.TargetID).Error
-		return album.Name, err
-	}
 	var image database.Image
 	err := db.First(&image, "id = ? AND state = ?", row.TargetID, "ready").Error
 	return image.Name, err
@@ -41,12 +38,51 @@ func (a *App) shareView(row database.Share) (shareView, error) {
 		title = "目标已删除"
 		err = nil
 	}
-	return shareView{Share: row, URL: "/s/" + token, HasPassword: row.PasswordHash != "", Title: title}, err
+	var owner database.User
+	if err == nil {
+		err = a.db.First(&owner, "id = ?", row.UserID).Error
+	}
+	return shareView{Share: row, URL: "/s/" + token, HasPassword: row.PasswordHash != "", Title: title, OwnerName: owner.Username, OwnerRole: owner.Role}, err
 }
 
 func (a *App) listShares(w http.ResponseWriter, r *http.Request, p principal) {
+	all, ok := allScope(w, r, p)
+	if !ok {
+		return
+	}
+	db := a.db.WithContext(r.Context())
+	q := ownerQuery(db.Model(&database.Share{}), p, all).Where("kind = ?", "image")
+	if p.Token != nil {
+		images := tokenAlbumQuery(db.Model(&database.Image{}).Where("user_id = ?", p.User.ID), p, "album_id", tokenShare).Select("id")
+		q = q.Where("target_id IN (?)", images)
+	}
+	if owner := r.URL.Query().Get("user_id"); owner != "" {
+		q = q.Where("user_id = ?", owner)
+	}
+	if search := strings.TrimSpace(r.URL.Query().Get("q")); search != "" {
+		escaped := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(strings.ToLower(search))
+		q = q.Where("target_id IN (?)", db.Model(&database.Image{}).Select("id").Where("LOWER(name) LIKE ? ESCAPE '!'", "%"+escaped+"%"))
+	}
+	switch r.URL.Query().Get("status") {
+	case "active":
+		q = q.Where("revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", time.Now().UTC())
+	case "expired":
+		q = q.Where("revoked_at IS NULL AND expires_at <= ?", time.Now().UTC())
+	case "revoked":
+		q = q.Where("revoked_at IS NOT NULL")
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		internal(w, err)
+		return
+	}
+	page, limit := listPage(r)
 	var rows []database.Share
-	if err := a.db.WithContext(r.Context()).Order("created_at DESC").Find(&rows).Error; err != nil {
+	order := "created_at DESC"
+	if r.URL.Query().Get("order") == "asc" {
+		order = "created_at ASC"
+	}
+	if err := q.Order(order).Order("id DESC").Offset((page - 1) * limit).Limit(limit).Find(&rows).Error; err != nil {
 		internal(w, err)
 		return
 	}
@@ -59,7 +95,7 @@ func (a *App) listShares(w http.ResponseWriter, r *http.Request, p principal) {
 		}
 		items = append(items, item)
 	}
-	respond(w, 200, items)
+	respond(w, 200, map[string]any{"items": items, "total": total, "page": page, "limit": limit})
 }
 
 func (a *App) createShare(w http.ResponseWriter, r *http.Request, p principal) {
@@ -72,8 +108,8 @@ func (a *App) createShare(w http.ResponseWriter, r *http.Request, p principal) {
 	if !decode(w, r, &input) {
 		return
 	}
-	if input.Kind != "image" && input.Kind != "album" || input.TargetID == "" {
-		fail(w, 400, "请选择图片或相册")
+	if input.Kind != "image" || input.TargetID == "" {
+		fail(w, 400, "请选择单张图片")
 		return
 	}
 	if input.ExpiresAt != nil && !input.ExpiresAt.After(time.Now()) {
@@ -89,8 +125,9 @@ func (a *App) createShare(w http.ResponseWriter, r *http.Request, p principal) {
 		return
 	}
 	token := randomHex(32)
-	row := database.Share{ID: randomID(), Kind: input.Kind, TargetID: input.TargetID, TokenHash: digest(token), ExpiresAt: input.ExpiresAt}
-	if _, err := a.shareTitle(a.db.WithContext(r.Context()), row); err != nil {
+	row := database.Share{ID: randomID(), UserID: p.User.ID, Kind: input.Kind, TargetID: input.TargetID, TokenHash: digest(token), ExpiresAt: input.ExpiresAt}
+	var target database.Image
+	if err := a.manageableImages(a.db.WithContext(r.Context()), p).First(&target, "id = ? AND state = ?", input.TargetID, "ready").Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			fail(w, 404, "分享目标不存在")
 		} else {
@@ -124,9 +161,22 @@ func (a *App) createShare(w http.ResponseWriter, r *http.Request, p principal) {
 	respond(w, 201, view)
 }
 
+func (a *App) manageableShares(db *gorm.DB, p principal) *gorm.DB {
+	q := db.Model(&database.Share{})
+	if p.User.Role != "admin" || p.Token != nil {
+		q = q.Where("user_id = ?", p.User.ID)
+	}
+	if p.Token != nil {
+		images := tokenAlbumQuery(db.Session(&gorm.Session{NewDB: true}).Model(&database.Image{}).Where("user_id = ?", p.User.ID), p, "album_id", tokenShare).Select("id")
+		q = q.Where("target_id IN (?)", images)
+	}
+	return q
+}
+
 func (a *App) revokeShare(w http.ResponseWriter, r *http.Request, p principal) {
 	id := r.PathValue("id")
-	result := a.db.WithContext(r.Context()).Model(&database.Share{}).Where("id = ?", id).Update("revoked_at", time.Now().UTC())
+	q := a.manageableShares(a.db.WithContext(r.Context()), p).Where("id = ?", id)
+	result := q.Update("revoked_at", time.Now().UTC())
 	if result.Error != nil {
 		internal(w, result.Error)
 		return
@@ -142,13 +192,41 @@ func (a *App) revokeShare(w http.ResponseWriter, r *http.Request, p principal) {
 	respond(w, 200, map[string]bool{"ok": true})
 }
 
+func (a *App) deleteShareRecord(w http.ResponseWriter, r *http.Request, p principal) {
+	db := a.db.WithContext(r.Context())
+	var row database.Share
+	if err := a.manageableShares(db, p).First(&row, "id = ?", r.PathValue("id")).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			fail(w, 404, "分享不存在")
+		} else {
+			internal(w, err)
+		}
+		return
+	}
+	if row.RevokedAt == nil {
+		fail(w, 409, "请先撤销分享，再删除记录")
+		return
+	}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("share_id = ?", row.ID).Delete(&database.ShareSession{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ? AND revoked_at IS NOT NULL", row.ID).Delete(&database.Share{}).Error
+	})
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	respond(w, 200, map[string]bool{"ok": true})
+}
+
 func (a *App) findShare(r *http.Request) (database.Share, error) {
 	var row database.Share
 	token := r.PathValue("token")
 	if len(token) != 64 {
 		return row, gorm.ErrRecordNotFound
 	}
-	err := a.db.WithContext(r.Context()).First(&row, "token_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", digest(token), time.Now().UTC()).Error
+	err := a.db.WithContext(r.Context()).First(&row, "token_hash = ? AND kind = 'image' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", digest(token), time.Now().UTC()).Error
 	if err != nil {
 		return row, err
 	}
@@ -181,6 +259,11 @@ func (a *App) publicShare(w http.ResponseWriter, r *http.Request) {
 		} else {
 			internal(w, err)
 		}
+		return
+	}
+	var target database.Image
+	if err := a.db.WithContext(r.Context()).First(&target, "id = ? AND state = ?", row.TargetID, "ready").Error; err != nil {
+		http.NotFound(w, r)
 		return
 	}
 	unlocked, err := a.shareUnlocked(r, row)
@@ -246,6 +329,11 @@ func (a *App) unlockShare(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	var target database.Image
+	if err := a.db.WithContext(r.Context()).First(&target, "id = ? AND state = ?", row.TargetID, "ready").Error; err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	if row.PasswordHash != "" && (len(input.Password) > 72 || bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(input.Password)) != nil) {
 		fail(w, 403, "分享密码错误")
 		return
@@ -268,15 +356,12 @@ func (a *App) unlockShare(w http.ResponseWriter, r *http.Request) {
 			internal(w, err)
 			return
 		}
-		http.SetCookie(w, &http.Cookie{Name: shareCookie(row.ID), Value: raw, Path: "/", HttpOnly: true, Secure: a.cfg.SecureCookie, SameSite: http.SameSiteStrictMode, MaxAge: max(1, int(time.Until(expires).Seconds()))})
+		http.SetCookie(w, &http.Cookie{Name: shareCookie(row.ID), Value: raw, Path: "/", HttpOnly: true, Secure: a.cookiesSecure(), SameSite: http.SameSiteStrictMode, MaxAge: max(1, int(time.Until(expires).Seconds()))})
 	}
 	respond(w, 200, map[string]bool{"ok": true})
 }
 
 func (a *App) shareImages(db *gorm.DB, row database.Share) *gorm.DB {
-	if row.Kind == "album" {
-		return db.Where("album_id = ?", row.TargetID)
-	}
 	return db.Where("id = ?", row.TargetID)
 }
 

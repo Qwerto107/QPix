@@ -1,8 +1,11 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -14,34 +17,40 @@ import (
 )
 
 func (a *App) listAlbums(w http.ResponseWriter, r *http.Request, p principal) {
-	var albums []database.Album
+	all, ok := allScope(w, r, p)
+	if !ok {
+		return
+	}
 	db := a.db.WithContext(r.Context())
-	if err := a.visibleAlbums(db, p).Order("created_at DESC").Find(&albums).Error; err != nil {
+	var albums []database.Album
+	q := tokenAlbumQuery(ownerQuery(db.Model(&database.Album{}), p, all), p, "id", tokenRead)
+	if owner := r.URL.Query().Get("user_id"); all && owner != "" {
+		q = q.Where("user_id = ?", owner)
+	}
+	if err := q.Order("created_at ASC").Find(&albums).Error; err != nil {
 		internal(w, err)
 		return
-	}
-	var counts []struct {
-		AlbumID string
-		Total   int64
-	}
-	if err := a.visibleImages(db.Model(&database.Image{}), p).Select("album_id, COUNT(*) AS total").Where("state = ? AND album_id IS NOT NULL", "ready").Group("album_id").Scan(&counts).Error; err != nil {
-		internal(w, err)
-		return
-	}
-	byID := map[string]int64{}
-	for _, count := range counts {
-		byID[count.AlbumID] = count.Total
 	}
 	items := make([]map[string]any, 0, len(albums))
 	for _, album := range albums {
-		members := []string{}
-		if p.User.Role == "admin" {
-			if err := db.Model(&database.AlbumMember{}).Where("album_id = ?", album.ID).Pluck("user_id", &members).Error; err != nil {
+		var count int64
+		if err := ownerQuery(db.Model(&database.Image{}), p, all).Where("album_id = ? AND state = ?", album.ID, "ready").Count(&count).Error; err != nil {
+			internal(w, err)
+			return
+		}
+		var owner database.User
+		if err := db.First(&owner, "id = ?", album.UserID).Error; err != nil {
+			internal(w, err)
+			return
+		}
+		refs := []string{}
+		if album.Referers != "" {
+			if err := json.Unmarshal([]byte(album.Referers), &refs); err != nil {
 				internal(w, err)
 				return
 			}
 		}
-		items = append(items, map[string]any{"id": album.ID, "name": album.Name, "count": byID[album.ID], "created_at": album.CreatedAt, "guest_visible": album.GuestVisible, "member_ids": members, "can_upload": p.User.ID != "" && a.albumWritable(r, p, album.ID)})
+		items = append(items, map[string]any{"id": album.ID, "name": album.Name, "count": count, "created_at": album.CreatedAt, "guest_visible": album.GuestVisible, "can_upload": p.allowsToken(&album.ID, tokenUpload), "owner_id": album.UserID, "owner_name": owner.Username, "owner_role": owner.Role, "is_default": owner.DefaultAlbumID == album.ID, "referer_mode": album.RefererMode, "referers": refs, "allow_empty_referer": album.AllowEmptyReferer})
 	}
 	respond(w, 200, items)
 }
@@ -66,7 +75,7 @@ func (a *App) createAlbum(w http.ResponseWriter, r *http.Request, p principal) {
 	if !ok {
 		return
 	}
-	album := database.Album{ID: randomID(), UserID: p.User.ID, Name: name}
+	album := database.Album{ID: randomID(), UserID: p.User.ID, Name: name, GuestVisible: true, RefererMode: "inherit", AllowEmptyReferer: true}
 	if err := a.db.WithContext(r.Context()).Create(&album).Error; err != nil {
 		internal(w, err)
 		return
@@ -81,7 +90,7 @@ func (a *App) renameAlbum(w http.ResponseWriter, r *http.Request, p principal) {
 	}
 	db := a.db.WithContext(r.Context())
 	var album database.Album
-	if err := db.First(&album, "id = ?", r.PathValue("id")).Error; err != nil {
+	if err := a.visibleAlbums(db, p).First(&album, "id = ?", r.PathValue("id")).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			fail(w, 404, "相册不存在")
 		} else {
@@ -96,170 +105,144 @@ func (a *App) renameAlbum(w http.ResponseWriter, r *http.Request, p principal) {
 	respond(w, 200, map[string]bool{"ok": true})
 }
 
-func (a *App) deleteAlbum(w http.ResponseWriter, r *http.Request, p principal) {
-	id := r.PathValue("id")
-	err := a.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-		var album database.Album
-		if err := tx.First(&album, "id = ?", id).Error; err != nil {
-			return err
-		}
-		// 图片回到上传者的私有未分类空间，避免删除相册意外公开图片。
-		if err := tx.Model(&database.Image{}).Where("album_id = ?", id).Update("album_id", nil).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("album_id = ?", id).Delete(&database.AlbumMember{}).Error; err != nil {
-			return err
-		}
-		return tx.Delete(&album).Error
-	})
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		fail(w, 404, "相册不存在")
-		return
-	}
-	if err != nil {
-		internal(w, err)
-		return
-	}
-	respond(w, 200, map[string]bool{"ok": true})
-}
-
 func (a *App) listTokens(w http.ResponseWriter, r *http.Request, p principal) {
-	rows := []database.APIToken{}
-	if err := a.db.WithContext(r.Context()).Where("user_id = ?", p.User.ID).Order("created_at DESC").Find(&rows).Error; err != nil {
+	all, ok := allScope(w, r, p)
+	if !ok {
+		return
+	}
+	db := a.db.WithContext(r.Context())
+	q := ownerQuery(db.Model(&database.APIToken{}), p, all)
+	q = filterRecords(q, r, "name", true)
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
 		internal(w, err)
 		return
 	}
-	respond(w, 200, rows)
+	page, limit := listPage(r)
+	var rows []database.APIToken
+	if err := q.Order(recordOrder(r)).Offset((page - 1) * limit).Limit(limit).Find(&rows).Error; err != nil {
+		internal(w, err)
+		return
+	}
+	items := make([]tokenView, 0, len(rows))
+	for _, row := range rows {
+		var owner database.User
+		if err := db.First(&owner, "id = ?", row.UserID).Error; err != nil {
+			internal(w, err)
+			return
+		}
+		item, err := a.tokenView(row, owner)
+		if err != nil {
+			internal(w, err)
+			return
+		}
+		items = append(items, item)
+	}
+	respond(w, 200, map[string]any{"items": items, "total": total, "page": page, "limit": limit})
 }
 
 func (a *App) createToken(w http.ResponseWriter, r *http.Request, p principal) {
-	var input struct {
-		Name      string     `json:"name"`
-		ExpiresAt *time.Time `json:"expires_at"`
-	}
+	var input tokenInput
 	if !decode(w, r, &input) {
 		return
 	}
-	input.Name = strings.TrimSpace(input.Name)
-	if input.Name == "" || utf8.RuneCountInString(input.Name) > 64 {
-		fail(w, 400, "Token 名称长度必须在 1–64 个字符之间")
+	policy, ok := a.validateTokenInput(w, r, p.User.ID, &input)
+	if !ok {
 		return
 	}
-	if input.ExpiresAt != nil {
-		utc := input.ExpiresAt.UTC()
-		if !utc.After(time.Now()) || utc.Year() > 9999 {
-			fail(w, 400, "到期时间必须晚于当前时间，且年份不能超过 9999")
-			return
-		}
-		input.ExpiresAt = &utc
-	}
+	encoded, _ := json.Marshal(policy)
 	raw := "qpix_" + randomHex(32)
-	row := database.APIToken{ID: randomID(), UserID: p.User.ID, Name: input.Name, Hash: digest(raw), Prefix: raw[:13], ExpiresAt: input.ExpiresAt}
+	row := database.APIToken{ID: randomID(), UserID: p.User.ID, Name: input.Name, Hash: digest(raw), Prefix: raw[:13], ExpiresAt: input.ExpiresAt, Authorization: string(encoded)}
 	if err := a.db.WithContext(r.Context()).Create(&row).Error; err != nil {
 		internal(w, err)
 		return
 	}
-	respond(w, 201, map[string]any{"token": raw, "item": row})
+	item, err := a.tokenView(row, p.User)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	respond(w, 201, map[string]any{"token": raw, "item": item})
 }
 
 func (a *App) revokeToken(w http.ResponseWriter, r *http.Request, p principal) {
-	result := a.db.WithContext(r.Context()).Where("id = ? AND user_id = ?", r.PathValue("id"), p.User.ID).Delete(&database.APIToken{})
+	q := a.db.WithContext(r.Context()).Model(&database.APIToken{}).Where("id = ?", r.PathValue("id"))
+	if p.User.Role != "admin" {
+		q = q.Where("user_id = ?", p.User.ID)
+	}
+	result := q.Where("revoked_at IS NULL").Update("revoked_at", time.Now().UTC())
 	if result.Error != nil {
 		internal(w, result.Error)
 		return
 	}
 	if result.RowsAffected == 0 {
-		fail(w, 404, "Token 不存在")
+		fail(w, 404, "Token 不存在或已撤销")
+		return
+	}
+	respond(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *App) deleteTokenRecord(w http.ResponseWriter, r *http.Request, p principal) {
+	db := a.db.WithContext(r.Context())
+	q := db.Where("id = ?", r.PathValue("id"))
+	if p.User.Role != "admin" {
+		q = q.Where("user_id = ?", p.User.ID)
+	}
+	var row database.APIToken
+	if err := q.First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			fail(w, 404, "Token 不存在")
+		} else {
+			internal(w, err)
+		}
+		return
+	}
+	if row.RevokedAt == nil {
+		fail(w, 409, "请先撤销 Token，再删除记录")
+		return
+	}
+	// 删除只清理已失效的凭据记录，不能影响图片、分享或其他 Token。
+	result := db.Where("id = ? AND revoked_at IS NOT NULL", row.ID).Delete(&database.APIToken{})
+	if result.Error != nil {
+		internal(w, result.Error)
+		return
+	}
+	if result.RowsAffected == 0 {
+		fail(w, 409, "Token 状态已变化，请刷新列表")
 		return
 	}
 	respond(w, 200, map[string]bool{"ok": true})
 }
 
 func (a *App) stats(w http.ResponseWriter, r *http.Request, p principal) {
+	all, ok := allScope(w, r, p)
+	if !ok {
+		return
+	}
 	db := a.db.WithContext(r.Context())
 	var totals struct {
 		Images int64 `json:"images"`
 		Bytes  int64 `json:"bytes"`
 	}
-	if err := a.visibleImages(db.Model(&database.Image{}), p).Select("COUNT(*) AS images, COALESCE(SUM(size), 0) AS bytes").Where("state = ?", "ready").Scan(&totals).Error; err != nil {
+	if err := tokenAlbumQuery(ownerQuery(db.Model(&database.Image{}), p, all), p, "album_id", tokenRead).Where("state = ?", "ready").Select("COUNT(*) AS images, COALESCE(SUM(size),0) AS bytes").Scan(&totals).Error; err != nil {
 		internal(w, err)
 		return
 	}
-	var albums, unfiled, today, deleting int64
-	for _, query := range []struct {
-		q      *gorm.DB
-		target *int64
+	var albums, today, deleting int64
+	for _, item := range []struct {
+		q *gorm.DB
+		n *int64
 	}{
-		{a.visibleAlbums(db, p), &albums},
-		{a.visibleImages(db.Model(&database.Image{}), p).Where("state = ? AND album_id IS NULL", "ready"), &unfiled},
-		{a.visibleImages(db.Model(&database.Image{}), p).Where("state = ? AND created_at >= ?", "ready", time.Now().UTC().Truncate(24*time.Hour)), &today},
-		{a.manageableImages(db.Model(&database.Image{}), p).Where("state = ?", "deleting"), &deleting},
+		{tokenAlbumQuery(ownerQuery(db.Model(&database.Album{}), p, all), p, "id", tokenRead), &albums},
+		{tokenAlbumQuery(ownerQuery(db.Model(&database.Image{}), p, all), p, "album_id", tokenRead).Where("state = ? AND created_at >= ?", "ready", time.Now().UTC().Truncate(24*time.Hour)), &today},
+		{tokenAlbumQuery(ownerQuery(db.Model(&database.Image{}), p, all), p, "album_id", tokenRead).Where("state = ?", "deleting"), &deleting},
 	} {
-		if err := query.q.Count(query.target).Error; err != nil {
+		if err := item.q.Count(item.n).Error; err != nil {
 			internal(w, err)
 			return
 		}
 	}
-	respond(w, 200, map[string]any{"images": totals.Images, "bytes": totals.Bytes, "albums": albums, "unfiled": unfiled, "today": today, "pending_deletions": deleting})
-}
-
-func (a *App) updateAlbumAccess(w http.ResponseWriter, r *http.Request, p principal) {
-	var input struct {
-		GuestVisible bool     `json:"guest_visible"`
-		MemberIDs    []string `json:"member_ids"`
-	}
-	if !decode(w, r, &input) {
-		return
-	}
-	if len(input.MemberIDs) > 200 {
-		fail(w, 400, "每个相册最多授权 200 个账号")
-		return
-	}
-	db := a.db.WithContext(r.Context())
-	id := r.PathValue("id")
-	var album database.Album
-	if err := db.First(&album, "id = ?", id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			fail(w, 404, "相册不存在")
-		} else {
-			internal(w, err)
-		}
-		return
-	}
-	seen := map[string]bool{}
-	members := []database.AlbumMember{}
-	for _, uid := range input.MemberIDs {
-		if seen[uid] {
-			continue
-		}
-		seen[uid] = true
-		var count int64
-		if err := db.Model(&database.User{}).Where("id = ? AND role = ?", uid, "user").Count(&count).Error; err != nil {
-			internal(w, err)
-			return
-		}
-		if count != 1 {
-			fail(w, 400, "授权账号不存在或不是普通用户")
-			return
-		}
-		members = append(members, database.AlbumMember{AlbumID: id, UserID: uid})
-	}
-	if err := db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&album).Update("guest_visible", input.GuestVisible).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("album_id = ?", id).Delete(&database.AlbumMember{}).Error; err != nil {
-			return err
-		}
-		if len(members) > 0 {
-			return tx.Create(&members).Error
-		}
-		return nil
-	}); err != nil {
-		internal(w, err)
-		return
-	}
-	respond(w, 200, map[string]bool{"ok": true})
+	respond(w, 200, map[string]any{"images": totals.Images, "bytes": totals.Bytes, "albums": albums, "unfiled": 0, "today": today, "pending_deletions": deleting})
 }
 
 func (a *App) settings(w http.ResponseWriter, r *http.Request, p principal) {
@@ -268,19 +251,28 @@ func (a *App) settings(w http.ResponseWriter, r *http.Request, p principal) {
 	profile := a.profiles[a.defaultStorage]
 	processing := a.processingSettings
 	limit := a.maxUploadBytes
+	appURL, secureCookie, pixels := a.appURL, a.secureCookie, a.maxPixels
+	proxies := make([]string, 0, len(a.trustedProxies))
+	for _, prefix := range a.trustedProxies {
+		proxies = append(proxies, prefix.String())
+	}
 	a.settingsMu.RUnlock()
-	respond(w, 200, map[string]any{"public_url": base, "max_upload_bytes": limit, "max_pixels": a.cfg.MaxPixels, "database": a.cfg.DBDriver, "storage": profile.Kind, "default_storage": profile.ID, "storage_name": profile.Name, "processing": processing, "formats": []string{"jpg", "png", "gif", "webp"}, "version": "0.3.0"})
+	respond(w, 200, map[string]any{"public_url": base, "app_url": appURL, "secure_cookie": secureCookie, "trusted_proxies": proxies, "max_upload_bytes": limit, "max_pixels": pixels, "database": a.cfg.DBDriver, "storage": profile.Kind, "default_storage": profile.ID, "storage_name": profile.Name, "processing": processing, "formats": []string{"jpg", "png", "gif", "webp"}, "version": "0.3.0"})
 }
 
 func (a *App) updateSettings(w http.ResponseWriter, r *http.Request, p principal) {
 	var input struct {
-		PublicURL      *string `json:"public_url"`
-		MaxUploadBytes *int64  `json:"max_upload_bytes"`
+		PublicURL      *string   `json:"public_url"`
+		MaxUploadBytes *int64    `json:"max_upload_bytes"`
+		AppURL         *string   `json:"app_url"`
+		SecureCookie   *bool     `json:"secure_cookie"`
+		TrustedProxies *[]string `json:"trusted_proxies"`
+		MaxPixels      *int64    `json:"max_pixels"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	if input.PublicURL == nil && input.MaxUploadBytes == nil {
+	if input.PublicURL == nil && input.MaxUploadBytes == nil && input.AppURL == nil && input.SecureCookie == nil && input.TrustedProxies == nil && input.MaxPixels == nil {
 		fail(w, 400, "请提供需要更新的设置")
 		return
 	}
@@ -296,8 +288,50 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request, p principal
 		fail(w, 400, "服务器单张上限必须在 1–100 MiB 之间")
 		return
 	}
+	if input.AppURL != nil {
+		value := strings.TrimRight(strings.TrimSpace(*input.AppURL), "/")
+		if len(value) > 2048 || config.ValidateURL(value) != nil {
+			fail(w, 400, "站点地址必须为完整的 HTTP(S) 源地址")
+			return
+		}
+		input.AppURL = &value
+	}
+	if input.MaxPixels != nil && !validMaxPixels(*input.MaxPixels) {
+		fail(w, 400, "像素上限必须在 100 万到 1 亿之间")
+		return
+	}
+	var proxies []netip.Prefix
+	if input.TrustedProxies != nil {
+		var err error
+		proxies, err = parseTrustedProxies(*input.TrustedProxies)
+		if err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
+	}
+	if input.SecureCookie != nil && *input.SecureCookie && r.TLS == nil {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		peer, _ := netip.ParseAddr(host)
+		trusted := a.trusted(peer.Unmap())
+		if input.TrustedProxies != nil {
+			trusted = false
+			for _, prefix := range proxies {
+				if prefix.Contains(peer.Unmap()) {
+					trusted = true
+					break
+				}
+			}
+		}
+		if !trusted || r.Header.Get("X-Forwarded-Proto") != "https" {
+			fail(w, 400, "请通过 HTTPS 访问后启用安全 Cookie；反向代理需先配置可信代理并传递 X-Forwarded-Proto: https")
+			return
+		}
+	}
 	a.settingsMu.Lock()
-	defer a.settingsMu.Unlock()
+	cookieChanged := input.SecureCookie != nil && *input.SecureCookie != a.secureCookie
 	// 先完成持久化再更新内存；部分字段保存不会覆盖其他设置。
 	err := a.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
 		if input.PublicURL != nil {
@@ -306,11 +340,45 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request, p principal
 			}
 		}
 		if input.MaxUploadBytes != nil {
-			return saveSetting(tx, "max_upload_bytes", strconv.FormatInt(*input.MaxUploadBytes, 10))
+			if err := saveSetting(tx, "max_upload_bytes", strconv.FormatInt(*input.MaxUploadBytes, 10)); err != nil {
+				return err
+			}
+		}
+		values := map[string]string{}
+		if input.AppURL != nil {
+			values["app_url"] = *input.AppURL
+		}
+		if input.SecureCookie != nil {
+			values["secure_cookie"] = strconv.FormatBool(*input.SecureCookie)
+		}
+		if input.MaxPixels != nil {
+			values["max_pixels"] = strconv.FormatInt(*input.MaxPixels, 10)
+		}
+		if input.TrustedProxies != nil {
+			normalized := make([]string, 0, len(proxies))
+			for _, prefix := range proxies {
+				normalized = append(normalized, prefix.String())
+			}
+			raw, _ := json.Marshal(normalized)
+			values["trusted_proxies"] = string(raw)
+		}
+		for key, value := range values {
+			if err := saveSetting(tx, key, value); err != nil {
+				return err
+			}
+		}
+		// Cookie 策略改变后清理旧登录和分享会话，避免旧凭据继续沿用原传输策略。
+		if cookieChanged {
+			for _, model := range []any{&database.Session{}, &database.ShareSession{}} {
+				if err := tx.Where("1 = 1").Delete(model).Error; err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
 	if err != nil {
+		a.settingsMu.Unlock()
 		internal(w, err)
 		return
 	}
@@ -320,5 +388,21 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request, p principal
 	if input.MaxUploadBytes != nil {
 		a.maxUploadBytes = *input.MaxUploadBytes
 	}
-	respond(w, 200, map[string]bool{"ok": true})
+	if input.AppURL != nil {
+		a.appURL = *input.AppURL
+	}
+	if input.SecureCookie != nil {
+		a.secureCookie = *input.SecureCookie
+	}
+	if input.TrustedProxies != nil {
+		a.trustedProxies = proxies
+	}
+	if input.MaxPixels != nil {
+		a.maxPixels = *input.MaxPixels
+	}
+	a.settingsMu.Unlock()
+	if cookieChanged {
+		a.setCookie(w, "", -1)
+	}
+	respond(w, 200, map[string]bool{"ok": true, "reauthenticate": cookieChanged})
 }

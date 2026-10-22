@@ -3,14 +3,15 @@ package database
 import "time"
 
 type User struct {
-	ID           string    `gorm:"primaryKey;size:32" json:"id"`
-	Username     string    `gorm:"uniqueIndex;size:64;not null" json:"username"`
-	PasswordHash string    `gorm:"size:128;not null" json:"-"`
-	Role         string    `gorm:"size:8;not null;default:user" json:"role"`
-	Enabled      bool      `gorm:"not null;default:true" json:"enabled"`
-	QuotaBytes   int64     `gorm:"not null;default:0" json:"quota_bytes"`
-	MaxFileBytes int64     `gorm:"not null;default:0" json:"max_file_bytes"`
-	CreatedAt    time.Time `json:"created_at"`
+	DefaultAlbumID string    `gorm:"size:32" json:"default_album_id"`
+	ID             string    `gorm:"primaryKey;size:32" json:"id"`
+	Username       string    `gorm:"uniqueIndex;size:64;not null" json:"username"`
+	PasswordHash   string    `gorm:"size:128;not null" json:"-"`
+	Role           string    `gorm:"size:8;not null;default:user" json:"role"`
+	Enabled        bool      `gorm:"not null;default:true" json:"enabled"`
+	QuotaBytes     int64     `gorm:"not null;default:0" json:"quota_bytes"`
+	MaxFileBytes   int64     `gorm:"not null;default:0" json:"max_file_bytes"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type Session struct {
@@ -21,11 +22,14 @@ type Session struct {
 }
 
 type Album struct {
-	ID           string    `gorm:"primaryKey;size:32" json:"id"`
-	UserID       string    `gorm:"index;size:32;not null" json:"-"`
-	Name         string    `gorm:"size:100;not null" json:"name"`
-	GuestVisible bool      `gorm:"not null;default:false" json:"guest_visible"`
-	CreatedAt    time.Time `json:"created_at"`
+	RefererMode       string    `gorm:"size:16;not null;default:inherit" json:"referer_mode"`
+	Referers          string    `gorm:"type:text" json:"-"`
+	AllowEmptyReferer bool      `gorm:"not null;default:true" json:"allow_empty_referer"`
+	ID                string    `gorm:"primaryKey;size:32" json:"id"`
+	UserID            string    `gorm:"index;size:32;not null" json:"-"`
+	Name              string    `gorm:"size:100;not null" json:"name"`
+	GuestVisible      bool      `gorm:"not null;default:false" json:"guest_visible"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type AlbumMember struct {
@@ -41,6 +45,7 @@ type UploadReservation struct {
 }
 
 type Share struct {
+	UserID       string     `gorm:"index;size:32" json:"owner_id"`
 	ID           string     `gorm:"primaryKey;size:32" json:"id"`
 	Kind         string     `gorm:"size:8;not null" json:"kind"`
 	TargetID     string     `gorm:"index;size:32;not null" json:"target_id"`
@@ -104,13 +109,16 @@ type AccessRule struct {
 }
 
 type APIToken struct {
-	ID        string     `gorm:"primaryKey;size:32" json:"id"`
-	UserID    string     `gorm:"index;size:32;not null" json:"-"`
-	Name      string     `gorm:"size:64;not null" json:"name"`
-	Hash      string     `gorm:"uniqueIndex;size:64;not null" json:"-"`
-	Prefix    string     `gorm:"size:16;not null" json:"prefix"`
-	CreatedAt time.Time  `json:"created_at"`
-	ExpiresAt *time.Time `gorm:"index" json:"expires_at"`
+	Authorization string     `gorm:"type:text" json:"-"`
+	LastUsedAt    *time.Time `json:"last_used_at"`
+	RevokedAt     *time.Time `gorm:"index" json:"revoked_at"`
+	ID            string     `gorm:"primaryKey;size:32" json:"id"`
+	UserID        string     `gorm:"index;size:32;not null" json:"-"`
+	Name          string     `gorm:"size:64;not null" json:"name"`
+	Hash          string     `gorm:"uniqueIndex;size:64;not null" json:"-"`
+	Prefix        string     `gorm:"size:16;not null" json:"prefix"`
+	CreatedAt     time.Time  `json:"created_at"`
+	ExpiresAt     *time.Time `gorm:"index" json:"expires_at"`
 }
 
 type Setting struct {

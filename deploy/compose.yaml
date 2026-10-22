@@ -17,12 +17,7 @@ services:
       QPIX_DB_DSN: ${QPIX_DB_DSN:-/data/qpix.db}
       QPIX_STORAGE_ROOT: ${QPIX_STORAGE_ROOT:-/data/uploads}
       QPIX_MASTER_KEY_FILE: ${QPIX_MASTER_KEY_FILE:-/data/master.key}
-      QPIX_TRUSTED_PROXIES: ${QPIX_TRUSTED_PROXIES:-}
       QPIX_DISABLE_ACCESS_RULES: ${QPIX_DISABLE_ACCESS_RULES:-false}
-      QPIX_MAX_UPLOAD_MB: ${QPIX_MAX_UPLOAD_MB:-20}
-      QPIX_SECURE_COOKIE: ${QPIX_SECURE_COOKIE:-false}
-      QPIX_APP_URL: ${QPIX_APP_URL:-}
-      QPIX_PUBLIC_URL: ${QPIX_PUBLIC_URL:-}
     volumes:
       - data:/data
     read_only: true

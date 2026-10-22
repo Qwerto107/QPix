@@ -33,6 +33,9 @@ type App struct {
 	loginLimits, uploadLimits limiter
 	settingsMu                sync.RWMutex
 	publicURL                 string
+	appURL                    string
+	secureCookie              bool
+	maxPixels                 int64
 	maxUploadBytes            int64
 	profiles                  map[string]database.StorageProfile
 	masterKey                 []byte
@@ -46,8 +49,11 @@ type App struct {
 }
 
 type principal struct {
-	User    database.User
-	Session *database.Session
+	Token          *tokenAuthorization
+	TokenID        string
+	TokenOperation string
+	User           database.User
+	Session        *database.Session
 }
 type protectedHandler func(http.ResponseWriter, *http.Request, principal)
 
@@ -61,6 +67,7 @@ func New(cfg config.Config, db *gorm.DB, stores map[string]storage.Store) (*App,
 	}
 	a := &App{cfg: cfg, db: db, stores: stores, processing: make(chan struct{}, 2), publicURL: cfg.PublicURL, maxUploadBytes: cfg.MaxUploadBytes}
 	a.frontend = frontend
+	a.appURL, a.secureCookie, a.maxPixels = cfg.AppURL, cfg.SecureCookie, cfg.MaxPixels
 	var count int64
 	if err := db.Model(&database.User{}).Count(&count).Error; err != nil {
 		return nil, err
@@ -79,6 +86,9 @@ func New(cfg config.Config, db *gorm.DB, stores map[string]storage.Store) (*App,
 		if err = db.Create(&database.User{ID: randomID(), Username: cfg.AdminUsername, PasswordHash: string(hash), Role: "admin", Enabled: true}).Error; err != nil {
 			return nil, err
 		}
+	}
+	if err := a.initPersonalAlbums(); err != nil {
+		return nil, err
 	}
 	var setting database.Setting
 	err = db.Where(map[string]any{"key": "public_url"}).First(&setting).Error
@@ -107,29 +117,35 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/me", a.protect(a.me, false))
 	mux.HandleFunc("POST /api/v1/auth/logout", a.protect(a.logout, false))
 	mux.HandleFunc("PUT /api/v1/auth/password", a.secure(a.changePassword, false, "write"))
-	mux.HandleFunc("GET /api/v1/images", a.protect(a.listImages, false))
+	mux.HandleFunc("GET /api/v1/images", a.protect(a.listImages, true))
 	mux.HandleFunc("POST /api/v1/images", a.protect(a.upload, true))
-	mux.HandleFunc("PATCH /api/v1/images/{id}", a.protect(a.updateImage, false))
-	mux.HandleFunc("POST /api/v1/images/batch-delete", a.protect(a.deleteImages, false))
-	mux.HandleFunc("GET /api/v1/albums", a.protect(a.listAlbums, false))
-	mux.HandleFunc("POST /api/v1/albums", a.admin(a.createAlbum, true))
-	mux.HandleFunc("PATCH /api/v1/albums/{id}", a.admin(a.renameAlbum, true))
-	mux.HandleFunc("DELETE /api/v1/albums/{id}", a.admin(a.deleteAlbum, true))
-	mux.HandleFunc("PUT /api/v1/albums/{id}/access", a.admin(a.updateAlbumAccess, true))
+	mux.HandleFunc("PATCH /api/v1/images/{id}", a.secure(a.updateImage, true, "write"))
+	mux.HandleFunc("POST /api/v1/images/batch-delete", a.secure(a.deleteImages, true, "write"))
+	mux.HandleFunc("GET /api/v1/albums", a.protect(a.listAlbums, true))
+	mux.HandleFunc("POST /api/v1/albums", a.secure(a.createAlbum, true, "write"))
+	mux.HandleFunc("PATCH /api/v1/albums/{id}", a.secure(a.renameAlbum, true, "write"))
+	mux.HandleFunc("DELETE /api/v1/albums/{id}", a.secure(a.deleteAlbum, true, "write"))
+	mux.HandleFunc("PUT /api/v1/albums/{id}/access", a.secure(a.updateAlbumAccess, true, "write"))
+	mux.HandleFunc("PUT /api/v1/albums/{id}/default", a.secure(a.setDefaultAlbum, true, "write"))
+	mux.HandleFunc("POST /api/v1/images/batch-move", a.secure(a.moveImages, true, "write"))
 	mux.HandleFunc("GET /api/v1/users", a.admin(a.listUsers, false))
 	mux.HandleFunc("POST /api/v1/users", a.admin(a.saveUser, true))
 	mux.HandleFunc("PUT /api/v1/users/{id}", a.admin(a.saveUser, true))
-	mux.HandleFunc("GET /api/v1/upload-options", a.protect(a.uploadOptions, false))
-	mux.HandleFunc("GET /api/v1/shares", a.admin(a.listShares, false))
-	mux.HandleFunc("POST /api/v1/shares", a.admin(a.createShare, true))
-	mux.HandleFunc("DELETE /api/v1/shares/{id}", a.admin(a.revokeShare, true))
+	mux.HandleFunc("DELETE /api/v1/users/{id}", a.admin(a.deleteUser, true))
+	mux.HandleFunc("GET /api/v1/upload-options", a.protect(a.uploadOptions, true))
+	mux.HandleFunc("GET /api/v1/shares", a.protect(a.listShares, true))
+	mux.HandleFunc("POST /api/v1/shares", a.secure(a.createShare, true, "write"))
+	mux.HandleFunc("DELETE /api/v1/shares/{id}", a.secure(a.revokeShare, true, "write"))
+	mux.HandleFunc("DELETE /api/v1/shares/{id}/record", a.secure(a.deleteShareRecord, true, "write"))
 	mux.HandleFunc("GET /api/v1/public-shares/{token}", a.publicShare)
 	mux.HandleFunc("POST /api/v1/public-shares/{token}/unlock", a.unlockShare)
 	mux.HandleFunc("GET /si/{token}/{file}", a.serveShareImage)
 	mux.HandleFunc("GET /api/v1/tokens", a.protect(a.listTokens, false))
-	mux.HandleFunc("POST /api/v1/tokens", a.protect(a.createToken, false))
-	mux.HandleFunc("DELETE /api/v1/tokens/{id}", a.protect(a.revokeToken, false))
-	mux.HandleFunc("GET /api/v1/stats", a.protect(a.stats, false))
+	mux.HandleFunc("POST /api/v1/tokens", a.secure(a.createToken, false, "write"))
+	mux.HandleFunc("PUT /api/v1/tokens/{id}", a.secure(a.updateToken, false, "write"))
+	mux.HandleFunc("DELETE /api/v1/tokens/{id}", a.secure(a.revokeToken, false, "write"))
+	mux.HandleFunc("DELETE /api/v1/tokens/{id}/record", a.secure(a.deleteTokenRecord, false, "write"))
+	mux.HandleFunc("GET /api/v1/stats", a.protect(a.stats, true))
 	mux.HandleFunc("GET /api/v1/settings", a.admin(a.settings, false))
 	mux.HandleFunc("PATCH /api/v1/settings", a.admin(a.updateSettings, true))
 	mux.HandleFunc("GET /api/v1/storages", a.admin(a.listProfiles, false))
@@ -178,8 +194,11 @@ func (a *App) sameOrigin(r *http.Request) bool {
 	if origin == "" {
 		return true
 	}
-	if a.cfg.AppURL != "" {
-		return origin == a.cfg.AppURL
+	a.settingsMu.RLock()
+	appURL := a.appURL
+	a.settingsMu.RUnlock()
+	if appURL != "" {
+		return origin == appURL
 	}
 	u, err := url.Parse(origin)
 	return err == nil && u.Host == r.Host && (u.Scheme == "http" || u.Scheme == "https")
@@ -199,7 +218,7 @@ func (a *App) admin(next protectedHandler, write bool) http.HandlerFunc {
 
 func (a *App) secure(next protectedHandler, allowToken bool, mode string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 权限写操作与在途上传、移动互斥，避免撤销授权后仍建立新的相册引用。
+		// 相册删除与策略写操作同上传互斥，避免建立悬空引用或使用已变更的规则。
 		if mode == "admin-write" || mode == "write" {
 			a.policyMu.Lock()
 			defer a.policyMu.Unlock()
@@ -214,13 +233,7 @@ func (a *App) secure(next protectedHandler, allowToken bool, mode string) http.H
 				fail(w, 401, "此接口不接受该凭据")
 				return
 			}
-			var token database.APIToken
-			if err := db.First(&token, "hash = ? AND (expires_at IS NULL OR expires_at > ?)", digest(strings.TrimPrefix(header, "Bearer ")), time.Now().UTC()).Error; err != nil {
-				authError(w, err, "上传 Token 无效或已过期")
-				return
-			}
-			if err := db.First(&p.User, "id = ?", token.UserID).Error; err != nil {
-				authError(w, err, "账号不存在")
+			if !a.authenticateToken(w, r, &p) {
 				return
 			}
 		} else {
@@ -252,12 +265,20 @@ func (a *App) secure(next protectedHandler, allowToken bool, mode string) http.H
 			fail(w, 403, "此账号没有操作权限")
 			return
 		}
-		if !(r.Method == "POST" && r.URL.Path == "/api/v1/images") {
-			scope := "images"
-			if p.User.Role == "admin" {
-				scope = "admin"
+		if p.Token != nil && !authorizeTokenRoute(w, r, &p) {
+			return
+		}
+		if !(r.Method == "POST" && r.URL.Path == "/api/v1/images") && !strings.HasPrefix(r.URL.Path, "/i/") {
+			if p.User.Role == "admin" && p.Token == nil {
+				if !a.enforceScope(w, r, "admin") {
+					return
+				}
 			}
-			if !a.enforceScope(w, r, scope) {
+		}
+		if p.Token != nil {
+			now := time.Now().UTC()
+			if err := db.Model(&database.APIToken{}).Where("id = ?", p.TokenID).Update("last_used_at", now).Error; err != nil {
+				internal(w, err)
 				return
 			}
 		}

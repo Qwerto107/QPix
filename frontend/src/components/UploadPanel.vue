@@ -18,6 +18,7 @@ import { bytes, copy, imageLink, message, type LinkFormat } from "../utils";
 
 const props = defineProps<{
   albums: Album[];
+  initialAlbum?: string;
   maxBytes: number;
   storages: Pick<StorageProfile, "id" | "name" | "enabled">[];
   defaultStorage: string;
@@ -43,7 +44,13 @@ interface UploadItem {
 }
 const queue = ref<UploadItem[]>([]);
 const input = ref<HTMLInputElement>();
-const album = ref("");
+const album = ref(props.initialAlbum || "");
+watch(
+  () => props.initialAlbum,
+  (value) => {
+    album.value = value || "";
+  },
+);
 const storage = ref("");
 const compression = ref("default");
 const quality = ref(props.defaultQuality);
@@ -80,7 +87,7 @@ const storageOptions = computed(() => [
   ...enabledStorages.value.map((row) => ({ value: row.id, label: row.name })),
 ]);
 const albumOptions = computed(() => [
-  { value: "", label: "未分类" },
+  { value: "", label: "使用我的默认相册" },
   ...props.albums.map((row) => ({ value: row.id, label: row.name })),
 ]);
 const enabledStorages = computed(() =>

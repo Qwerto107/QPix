@@ -21,6 +21,7 @@ const root = ref<HTMLElement>();
 const menu = ref<HTMLElement>();
 const open = ref(false);
 const above = ref(false);
+const menuHeight = ref(224);
 const active = ref(0);
 const selected = computed(() =>
   props.options.find((option) => option.value === props.modelValue),
@@ -31,10 +32,28 @@ let lastKey = 0;
 function reveal() {
   const bounds = root.value?.getBoundingClientRect();
   const height = Math.min(props.options.length * 33 + 12, 224);
-  above.value =
-    !!bounds &&
-    bounds.bottom + height + 6 > window.innerHeight &&
-    bounds.top > height + 6;
+  if (!bounds) return;
+  let top = 8,
+    bottom = window.innerHeight - 8;
+  // 同时考虑滚动容器的裁切边界，避免弹窗中的长菜单展开到不可见区域。
+  for (
+    let parent = root.value?.parentElement;
+    parent;
+    parent = parent.parentElement
+  ) {
+    if (!/auto|scroll|hidden|clip/.test(getComputedStyle(parent).overflowY))
+      continue;
+    const rect = parent.getBoundingClientRect();
+    top = Math.max(top, rect.top + parent.clientTop);
+    bottom = Math.min(
+      bottom,
+      rect.top + parent.clientTop + parent.clientHeight,
+    );
+  }
+  const below = Math.max(0, bottom - bounds.bottom - 6);
+  const upper = Math.max(0, bounds.top - top - 6);
+  above.value = below < height && upper > below;
+  menuHeight.value = Math.min(height, above.value ? upper : below);
   open.value = true;
   active.value = Math.max(
     0,
@@ -136,6 +155,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", outside));
       :aria-label="label"
       class="select-menu"
       :class="{ 'select-menu-above': above }"
+      :style="{ maxHeight: `${menuHeight}px` }"
     >
       <li
         v-for="(option, index) in options"

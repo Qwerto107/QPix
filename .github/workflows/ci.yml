@@ -72,3 +72,32 @@ jobs:
             printf 'Digest: `%s`\n\n' "$IMAGE_DIGEST"
             printf '架构：linux/amd64、linux/arm64。前后端位于同一镜像，使用同一端口。\n'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: 发布 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          image="ghcr.io/${GH_REPO,,}:${RELEASE_TAG#v}"
+          printf '统一镜像（linux/amd64、linux/arm64）：\n\n```sh\ndocker pull %s\n```\n\n前后端位于同一镜像，部署方法见 [部署文档](https://github.com/%s/blob/%s/docs/cicd.md)。\n' \
+            "$image" "$GH_REPO" "$RELEASE_TAG" > release-notes.md
+          args=(--repo "$GH_REPO" --verify-tag --title "QPix $RELEASE_TAG" --generate-notes --notes-file release-notes.md)
+          # 预发布不标记为最新正式版，与镜像 latest 标签保持一致。
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            args+=(--prerelease --latest=false)
+          else
+            args+=(--latest)
+          fi
+          if ! gh release view "$RELEASE_TAG" --repo "$GH_REPO" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" "${args[@]}"
+          fi
+          printf 'Release: https://github.com/%s/releases/tag/%s\n' "$GH_REPO" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"

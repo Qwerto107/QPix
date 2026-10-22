@@ -55,6 +55,11 @@ func TestTokenExpiryBecomesNullable(t *testing.T) {
 	if err = db.Migrator().CreateTable(&SchemaMigration{}); err != nil {
 		t.Fatal(err)
 	}
+	for _, model := range []any{&User{}, &Album{}, &Share{}, &AlbumMember{}} {
+		if err = db.Migrator().CreateTable(model); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, version := range []int{1, 2, 3} {
 		if err = db.Create(&SchemaMigration{Version: version, AppliedAt: time.Now().UTC()}).Error; err != nil {
 			t.Fatal(err)
@@ -64,7 +69,7 @@ func TestTokenExpiryBecomesNullable(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
-	if err = db.Create(&APIToken{ID: "existing", UserID: "user", Name: "保留期限", Hash: "existing-hash", Prefix: "qpix_old", ExpiresAt: &expires}).Error; err != nil {
+	if err = db.Omit("LastUsedAt", "RevokedAt", "Authorization").Create(&APIToken{ID: "existing", UserID: "user", Name: "保留期限", Hash: "existing-hash", Prefix: "qpix_old", ExpiresAt: &expires}).Error; err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -81,5 +86,52 @@ func TestTokenExpiryBecomesNullable(t *testing.T) {
 	}
 	if err = db.Create(&APIToken{ID: "duplicate", UserID: "user", Name: "重复哈希", Hash: existing.Hash, Prefix: "qpix_dup"}).Error; err == nil {
 		t.Fatal("迁移丢失了令牌哈希唯一约束")
+	}
+}
+
+func TestTokenPermissionMigration(t *testing.T) {
+	db, err := Open("sqlite", filepath.Join(t.TempDir(), "v5.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, _ := db.DB()
+	defer pool.Close()
+	if err = Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Migrator().DropColumn(&APIToken{}, "Authorization"); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Where("version = ?", 6).Delete(&SchemaMigration{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, user := range []User{{ID: "admin", Username: "admin", Role: "admin", Enabled: true}, {ID: "user", Username: "user", Role: "user", Enabled: true}} {
+		if err = db.Create(&user).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"admin", "user"} {
+		row := APIToken{ID: id, UserID: id, Name: "历史 Token", Hash: id + "-hash", Prefix: "qpix_old"}
+		if err = db.Omit("Authorization").Create(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err = Migrate(db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var admin, user APIToken
+	if err = db.First(&admin, "id = ?", "admin").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err = db.First(&user, "id = ?", "user").Error; err != nil {
+		t.Fatal(err)
+	}
+	if admin.RevokedAt == nil || user.RevokedAt != nil || user.Hash != "user-hash" || user.ExpiresAt != nil {
+		t.Fatal("旧 Token 状态或凭据被错误迁移")
+	}
+	if user.Authorization != `{"all_albums":true,"permissions":["upload"],"albums":[]}` {
+		t.Fatal("旧用户 Token 权限被扩大或丢失")
 	}
 }

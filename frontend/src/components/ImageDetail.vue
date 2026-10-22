@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { Copy, ExternalLink, Trash2, Check, ImageOff } from "@lucide/vue";
+import { computed, ref } from "vue";
+import { Copy, ExternalLink, Trash2, Check } from "@lucide/vue";
+import ImagePreview from "./ImagePreview.vue";
 import Modal from "./Modal.vue";
+import SelectField from "./SelectField.vue";
 import { api } from "../api";
 import type { Album, ImageItem } from "../types";
 import {
@@ -28,8 +30,21 @@ const emit = defineEmits<{
 }>();
 const name = ref(props.image.name);
 const album = ref(props.image.album_id || "");
+const policyChanges = computed(() => {
+  if (album.value === props.image.album_id) return false;
+  const from = props.albums.find((v) => v.id === props.image.album_id),
+    to = props.albums.find((v) => v.id === album.value);
+  return (
+    to &&
+    (!from ||
+      from.guest_visible !== to.guest_visible ||
+      from.referer_mode !== to.referer_mode ||
+      from.allow_empty_referer !== to.allow_empty_referer ||
+      JSON.stringify([...from.referers].sort()) !==
+        JSON.stringify([...to.referers].sort()))
+  );
+});
 const busy = ref(false);
-const imageFailed = ref(false);
 const error = ref("");
 async function save() {
   if (busy.value) return;
@@ -62,18 +77,7 @@ async function copyLink(format: LinkFormat) {
 <template>
   <Modal title="图片详情" wide :busy="busy" @close="!busy && emit('close')">
     <div class="detail-layout">
-      <div class="detail-preview">
-        <img
-          v-if="!imageFailed"
-          :src="image.url"
-          :alt="image.name"
-          @error="imageFailed = true"
-        />
-        <div v-else class="empty-state">
-          <ImageOff :size="36" />
-          <p>图片暂时无法加载</p>
-        </div>
-      </div>
+      <ImagePreview :src="image.url" :alt="image.name" />
       <div class="detail-fields">
         <span class="tag">{{ image.format.toUpperCase() }}</span>
         <form @submit.prevent="save">
@@ -85,23 +89,24 @@ async function copyLink(format: LinkFormat) {
             required
             :disabled="!image.can_manage"
           />
-          <label class="field-label" for="image-album">所属相册</label
-          ><select
+          <label class="field-label">所属相册</label
+          ><SelectField
             id="image-album"
+            label="所属相册"
             v-model="album"
-            :disabled="!image.can_manage"
-          >
-            <option value="">未分类</option>
-            <option
-              v-for="item in albums.filter(
-                (row) => row.can_upload || row.id === image.album_id,
-              )"
-              :key="item.id"
-              :value="item.id"
-            >
-              {{ item.name }}
-            </option>
-          </select>
+            :options="
+              albums
+                .filter((v) => v.owner_id === image.owner_id)
+                .map((v) => ({
+                  value: v.id,
+                  label: v.owner_name ? `${v.owner_name} / ${v.name}` : v.name,
+                }))
+            "
+          />
+          <p v-if="policyChanges" class="info-banner">
+            目标相册的访问权限或 Referer
+            策略不同，保存后图片及分享将按目标规则访问。
+          </p>
           <dl class="image-meta">
             <div>
               <dt>尺寸</dt>
