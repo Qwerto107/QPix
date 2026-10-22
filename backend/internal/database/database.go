@@ -2,6 +2,7 @@ package database
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 	_ "modernc.org/sqlite"
 )
@@ -20,7 +22,7 @@ func Open(driver, dsn string) (*gorm.DB, error) {
 	case "sqlite":
 		// 使用普通文件路径，避免把 DSN 参数误当成文件名；SQLite 参数在连接后统一配置。
 		if err := os.MkdirAll(filepath.Dir(dsn), 0700); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("创建 SQLite 数据目录失败：%w", err)
 		}
 		dialector = sqlite.New(sqlite.Config{DriverName: "sqlite", DSN: dsn})
 	case "postgres":
@@ -30,13 +32,19 @@ func Open(driver, dsn string) (*gorm.DB, error) {
 	default:
 		return nil, fmt.Errorf("不支持的数据库类型：%s", driver)
 	}
-	db, err := gorm.Open(dialector, &gorm.Config{Logger: logger.Default.LogMode(logger.Silent), TranslateError: true})
+	// 只记录失败 SQL，保留参数占位符，避免将凭据和业务数据插入 SQL 日志。
+	dbLogger := logger.New(log.New(os.Stderr, "", log.LstdFlags), logger.Config{
+		LogLevel:                  logger.Error,
+		IgnoreRecordNotFoundError: true,
+		ParameterizedQueries:      true,
+	})
+	db, err := gorm.Open(dialector, &gorm.Config{Logger: dbLogger, TranslateError: true})
 	if err != nil {
-		return nil, fmt.Errorf("连接数据库失败，请检查连接配置")
+		return nil, fmt.Errorf("连接 %s 数据库失败：%w", driver, err)
 	}
 	pool, err := db.DB()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("获取 %s 数据库连接池失败：%w", driver, err)
 	}
 	pool.SetConnMaxLifetime(30 * time.Minute)
 	pool.SetMaxOpenConns(10)
@@ -49,7 +57,7 @@ func Open(driver, dsn string) (*gorm.DB, error) {
 		for _, sql := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON"} {
 			if err = db.Exec(sql).Error; err != nil {
 				pool.Close()
-				return nil, err
+				return nil, fmt.Errorf("配置 SQLite（%s）失败：%w", sql, err)
 			}
 		}
 	}
@@ -237,7 +245,11 @@ func migrateTokenPermissions(db *gorm.DB) error {
 		}
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&APIToken{}).Where("authorization IS NULL OR authorization = ?", "").Update("authorization", `{"all_albums":true,"permissions":["upload"],"albums":[]}`).Error; err != nil {
+		// authorization 是 PostgreSQL 保留字，由数据库方言负责引用列名。
+		if err := tx.Model(&APIToken{}).Where(clause.Or(
+			clause.Eq{Column: clause.Column{Name: "authorization"}, Value: nil},
+			clause.Eq{Column: clause.Column{Name: "authorization"}, Value: ""},
+		)).Update("authorization", `{"all_albums":true,"permissions":["upload"],"albums":[]}`).Error; err != nil {
 			return err
 		}
 		admins := tx.Model(&User{}).Select("id").Where("role = ?", "admin")

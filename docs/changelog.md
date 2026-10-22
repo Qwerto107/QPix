@@ -2,6 +2,11 @@
 
 [文档中心](README.md) · [下载版本](https://github.com/Qwerto107/QPix/releases) · [发布流程](releasing.md)
 
+## v0.1.2 · 2026-10-22
+
+- 修复 PostgreSQL 初始化时 Token 权限迁移查询未引用保留字列名，导致服务无法启动的问题；保留已有数据。
+- 数据库连接失败保留驱动具体错误，迁移失败标明数据库类型；记录失败 SQL、调用位置和耗时，SQL 参数保持占位符。
+
 ## v0.1.1 · 2026-10-22
 
 - 完整程序内嵌前端，增加 Linux amd64、arm64、armv6、armv5、loong64，Windows amd64 和 macOS arm64 二进制打包。

@@ -70,7 +70,7 @@ func run() error {
 	pool, _ := db.DB()
 	defer pool.Close()
 	if err = database.Migrate(db); err != nil {
-		return err
+		return fmt.Errorf("迁移 %s 数据库失败：%w", cfg.DBDriver, err)
 	}
 	local, err := storage.NewLocal(cfg.StorageRoot)
 	if err != nil {
