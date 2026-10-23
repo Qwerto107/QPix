@@ -212,6 +212,14 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		fail(w, 400, "图片名称长度必须在 1–255 个字符之间")
 		return
 	}
+	randomName := true
+	if values, present := r.MultipartForm.Value["random_name"]; present {
+		if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
+			fail(w, 400, "random_name 必须为 true 或 false")
+			return
+		}
+		randomName = values[0] == "true"
+	}
 	value := r.FormValue("album_id")
 	if value == "" {
 		value, err = a.defaultAlbum(r, p.User.ID)
@@ -333,6 +341,9 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		format = "jpg"
 	}
 	id := randomID()
+	if randomName {
+		name = id + "." + format
+	}
 	folder := time.Now().UTC().Format("2006/01/")
 	size := header.Size
 	var content io.Reader = file

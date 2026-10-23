@@ -57,6 +57,7 @@ export function uploadImage(
     storage_id: string;
     compression: string;
     quality: number;
+    random_name: boolean;
   },
 ): Promise<ImageItem> {
   return new Promise((resolve, reject) => {
@@ -67,6 +68,7 @@ export function uploadImage(
     if (options?.storage_id) form.append("storage_id", options.storage_id);
     if (options?.compression) form.append("compression", options.compression);
     if (options) form.append("quality", String(options.quality));
+    if (options) form.append("random_name", String(options.random_name));
     xhr.open("POST", "/api/v1/images");
     xhr.setRequestHeader("X-CSRF-Token", csrf);
     xhr.timeout = 120_000;

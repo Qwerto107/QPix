@@ -23,6 +23,9 @@ func testFormatPreviews(t *testing.T, a *App, c *testClient) {
 	if err := json.Unmarshal(c.upload(encoded.Bytes(), "duplicate.bmp", "", "", 201), &uploaded); err != nil {
 		t.Fatal(err)
 	}
+	if uploaded.Name != uploaded.ID+".bmp" {
+		t.Fatal("上传未默认使用随机文件名", uploaded.Name)
+	}
 	if uploaded.PreviewURL == "" || uploaded.PreviewURL == uploaded.URL {
 		t.Fatal("BMP 缺少独立预览")
 	}
@@ -66,7 +69,7 @@ func testFormatPreviews(t *testing.T, a *App, c *testClient) {
 		t.Fatal("删除未清理预览文件", openErr)
 	}
 	svg := []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="green"/></svg>`)
-	if err := json.Unmarshal(c.upload(svg, "icon.svg", "", "", 201), &uploaded); err != nil {
+	if err := json.Unmarshal(c.upload(svg, "icon.svg", "", "", 201, map[string]string{"random_name": "false"}), &uploaded); err != nil {
 		t.Fatal(err)
 	}
 	request, _ := http.NewRequest("GET", c.server.URL+uploaded.URL, nil)
@@ -79,4 +82,5 @@ func testFormatPreviews(t *testing.T, a *App, c *testClient) {
 		t.Fatal("SVG 缺少独立执行限制")
 	}
 	c.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{uploaded.ID}}, 200)
+	c.upload(svg, "icon.svg", "", "", 400, map[string]string{"random_name": "invalid"})
 }

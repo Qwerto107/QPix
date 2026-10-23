@@ -190,7 +190,7 @@ func TestLifecycle(t *testing.T) {
 			c.upload(make([]byte, 5000), "large.png", "", "", 413)
 			c.upload(testPNG(t, 11, 10), "pixels.png", "", "", 413)
 			var uploaded imageView
-			if err = json.Unmarshal(c.upload(fixture, "猫咪.png", album.ID, "", 201), &uploaded); err != nil {
+			if err = json.Unmarshal(c.upload(fixture, "猫咪.png", album.ID, "", 201, map[string]string{"random_name": "false"}), &uploaded); err != nil {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(c.request("GET", uploaded.URL, nil, 200), fixture) {

@@ -39,6 +39,7 @@ interface UploadItem {
   storage: string;
   compression: string;
   quality: number;
+  randomName: boolean;
   state: "waiting" | "uploading" | "done" | "error";
   progress: number;
   error?: string;
@@ -56,6 +57,7 @@ watch(
 const storage = ref("");
 const compression = ref("default");
 const quality = ref(props.defaultQuality);
+const randomName = ref(true);
 const acceptedFiles = computed(() =>
   props.formats.map((format) => `.${format}`).join(","),
 );
@@ -134,6 +136,7 @@ function addFiles(files: File[] | FileList) {
           ? props.defaultCompression
           : compression.value,
       quality: quality.value,
+      randomName: randomName.value,
       state: "waiting",
       progress: 0,
     });
@@ -164,6 +167,7 @@ function run() {
         storage_id: item.storage,
         compression: item.compression,
         quality: item.quality,
+        random_name: item.randomName,
       },
     )
       .then((image) => {
@@ -394,6 +398,10 @@ defineExpose({ addFiles });
           }}
         </p>
         <p class="field-help">选项只作用于之后加入队列的图片。</p>
+        <label class="check-field">
+          <input v-model="randomName" type="checkbox" />随机文件名
+        </label>
+        <p class="field-help">默认生成随机名称；取消后保留原文件名。</p>
       </div>
       <div class="panel">
         <h3><Folder :size="17" />存入相册</h3>

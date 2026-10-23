@@ -157,8 +157,9 @@ curl -H "Authorization: Bearer $QPIX_TOKEN" \
 | storage_id | 省略时使用默认存储 |
 | compression | default、none、preserve、webp；省略或 default 使用后台默认值 |
 | quality | 1～100 的整数，省略使用默认画质 |
+| random_name | true／false，省略为 true；使用随机 ID 作为显示名称，false 保留原文件名 |
 
-none 保留原文件，preserve 保留原格式压缩，webp 转为有损 WebP。画质表示编码质量，透明通道保留；只有结果更小时才采用。空字符串、小数、重复或非法画质字段返回 400。格式及元数据处理见 [压缩细节](usage.md#压缩细节)。
+none 保留原文件，preserve 保留原格式压缩，webp 转为有损 WebP。画质表示编码质量，透明通道保留；只有结果更小时才采用。空字符串、小数、重复或非法画质字段返回 400。random_name 只接受单个 true 或 false，其余值返回 400；存储键和直链始终使用随机 ID。格式及元数据处理见 [压缩细节](usage.md#压缩细节)。
 
 接收阶段最多 8 个全局在途请求、每账号 2 个，图片处理全局并发 2 个。多图客户端应拆分请求，建议最多两个并发。重复上传产生独立记录，不自动去重。
 

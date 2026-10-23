@@ -149,7 +149,7 @@ PNG 使用色阶量化与 DEFLATE，画质 100 保留完整 8 位色阶；量化
 
 BMP／TIFF 使用 `x/image`，ICO 使用有界目录校验及 PNG 帧编码。AVIF 使用 `gen2brain/avif` 内嵌 WASM，HEIC 使用 `gen2brain/h265/heic`，静态 JXL 使用 `gen2brain/jxl`。SVG 先校验 XML，再尝试用 `oksvg`／`rasterx` 生成静态缩略图；不支持的绘图特性由浏览器预览原文件。动画和多页文件避免重编码，ICO 转 WebP 显式取最大尺寸。
 
-原文件、独立预览和缩略图都用同一个 ID 的不同后缀保存，失败补偿及删除清理覆盖三类对象。
+上传默认以随机 ID 命名，`random_name=false` 仅改变显示名称。原文件、独立预览和缩略图都用同一个 ID 的不同后缀保存，失败补偿及删除清理覆盖三类对象。
 
 ### 缩略图
 
