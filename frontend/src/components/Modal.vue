@@ -7,6 +7,14 @@ const emit = defineEmits<{ close: [] }>();
 const panel = ref<HTMLElement>();
 const previousFocus = document.activeElement as HTMLElement | null;
 const previousOverflow = document.body.style.overflow;
+let pressedBackdrop = false;
+let releasedBackdrop = false;
+
+function closeBackdrop() {
+  // 拖选文本可能在遮罩层生成 click，只有按下与松开都位于遮罩时才关闭。
+  if (pressedBackdrop && releasedBackdrop && !props.busy) emit("close");
+  pressedBackdrop = releasedBackdrop = false;
+}
 
 function keydown(event: KeyboardEvent) {
   if (event.key === "Escape" && !props.busy) {
@@ -52,7 +60,16 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body">
-    <div class="modal-backdrop" @click.self="!busy && emit('close')">
+    <div
+      class="modal-backdrop"
+      @pointerdown="
+        pressedBackdrop = $event.target === $event.currentTarget;
+        releasedBackdrop = false;
+      "
+      @pointerup="releasedBackdrop = $event.target === $event.currentTarget"
+      @pointercancel="pressedBackdrop = releasedBackdrop = false"
+      @click.self="closeBackdrop"
+    >
       <section
         ref="panel"
         class="modal"
