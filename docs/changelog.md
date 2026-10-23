@@ -2,6 +2,10 @@
 
 [文档中心](README.md) · [下载版本](https://github.com/Qwerto107/QPix/releases) · [发布流程](releasing.md)
 
+## v0.3.1 · 2026-10-23
+
+- 相册访问设置展示只读相册 ID，支持一键复制，便于填写 API 的 album_id 参数。
+
 ## v0.3.0 · 2026-10-23
 
 - 增加 BMP、TIFF、ICO、AVIF、HEIC／HEIF、静态 JXL 和 SVG 上传，以及动画 WebP 原文件保存。
