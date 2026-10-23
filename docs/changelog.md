@@ -2,7 +2,7 @@
 
 [文档中心](README.md) · [下载版本](https://github.com/Qwerto107/QPix/releases) · [发布流程](releasing.md)
 
-## 未发布
+## v0.3.0 · 2026-10-23
 
 - 增加 BMP、TIFF、ICO、AVIF、HEIC／HEIF、静态 JXL 和 SVG 上传，以及动画 WebP 原文件保存。
 - 静态位图支持原格式压缩和转 WebP，保留透明度；多尺寸 ICO 原格式压缩保留各尺寸，转 WebP 取最大尺寸。

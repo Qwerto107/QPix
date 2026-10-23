@@ -282,7 +282,7 @@ func (a *App) settings(w http.ResponseWriter, r *http.Request, p principal) {
 		proxies = append(proxies, prefix.String())
 	}
 	a.settingsMu.RUnlock()
-	respond(w, 200, map[string]any{"public_url": base, "app_url": appURL, "secure_cookie": secureCookie, "trusted_proxies": proxies, "max_upload_bytes": limit, "max_pixels": pixels, "database": a.cfg.DBDriver, "storage": profile.Kind, "default_storage": profile.ID, "storage_name": profile.Name, "processing": processingSettings, "formats": processing.Formats(), "version": "0.2.0"})
+	respond(w, 200, map[string]any{"public_url": base, "app_url": appURL, "secure_cookie": secureCookie, "trusted_proxies": proxies, "max_upload_bytes": limit, "max_pixels": pixels, "database": a.cfg.DBDriver, "storage": profile.Kind, "default_storage": profile.ID, "storage_name": profile.Name, "processing": processingSettings, "formats": processing.Formats(), "version": "0.3.0"})
 }
 
 func (a *App) updateSettings(w http.ResponseWriter, r *http.Request, p principal) {
