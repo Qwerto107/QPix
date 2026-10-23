@@ -76,7 +76,7 @@ export QPIX_ADMIN_PASSWORD='replace-this-password'
 
 路径相对进程工作目录。运行账号须有写入权限，长期运行应固定工作目录或使用绝对路径。**保留原主密钥并与数据一起备份。**
 
-`QPIX_WEB_ROOT` 留空使用内嵌页面。数据库、初始存储和密钥使用 [启动参数](https://github.com/Qwerto107/QPix/blob/main/docs/deployment.md#启动参数)；站点、代理、上传限制和多存储通过 [后台设置](https://github.com/Qwerto107/QPix/blob/main/docs/deployment.md#后台运行设置) 配置。
+`QPIX_WEB_ROOT` 留空使用内嵌页面。数据库、初始存储和密钥使用 [启动参数](https://github.com/Qwerto107/QPix/blob/main/docs/deployment.md#启动参数)；站点、上传与压缩、访问控制和限频在“系统设置”中配置，多存储在“存储管理”中配置，见 [后台运行设置](https://github.com/Qwerto107/QPix/blob/main/docs/deployment.md#后台运行设置)。
 
 运行 `./qpix healthcheck`，Windows 使用 `./qpix.exe healthcheck`，可检查当前 QPIX_ADDR 的健康接口。返回非零表示失败，该命令不会初始化数据库。
 
