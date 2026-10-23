@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { Copy } from "@lucide/vue";
 import Modal from "./Modal.vue";
 import SelectField from "./SelectField.vue";
 import { api } from "../api";
 import type { Album } from "../types";
-import { message } from "../utils";
+import { copy, message } from "../utils";
 const props = defineProps<{ album: Album }>();
 const emit = defineEmits<{
   close: [];
@@ -17,6 +18,14 @@ const guest = ref(props.album.guest_visible),
   empty = ref(props.album.allow_empty_referer),
   busy = ref(false),
   error = ref("");
+async function copyAlbumID() {
+  try {
+    await copy(props.album.id);
+    emit("notice", "相册 ID 已复制");
+  } catch {
+    emit("notice", "复制失败，请检查剪贴板权限", true);
+  }
+}
 async function save() {
   busy.value = true;
   error.value = "";
@@ -43,6 +52,14 @@ async function save() {
 <template>
   <Modal :title="`访问设置 · ${album.name}`" :busy="busy" @close="emit('close')"
     ><form class="modal-body" @submit.prevent="save">
+      <label class="field-label" for="album-id">相册 ID</label>
+      <div class="album-id-field">
+        <input id="album-id" :value="album.id" readonly spellcheck="false" />
+        <button type="button" class="button" @click="copyAlbumID">
+          <Copy :size="15" />复制
+        </button>
+      </div>
+      <p class="field-help">调用 API 时填入 <code>album_id</code> 参数。</p>
       <label class="check-field"
         ><input
           v-model="guest"
@@ -101,3 +118,16 @@ async function save() {
     </form></Modal
   >
 </template>
+
+<style scoped>
+.album-id-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.album-id-field input {
+  min-width: 0;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+</style>
