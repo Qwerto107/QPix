@@ -1733,6 +1733,136 @@ input.quality-slider:disabled {
   flex-direction: column;
   gap: 23px;
 }
+.settings-console {
+  display: grid;
+  gap: 20px;
+  max-width: 1280px;
+  min-width: 0;
+}
+.settings-categories {
+  display: flex;
+  border-bottom: 1px solid #dce6df;
+  gap: 24px;
+}
+.settings-categories > button {
+  flex-shrink: 0;
+  min-height: 40px;
+  padding: 10px 2px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: #596d65;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.settings-categories > button:hover {
+  color: #285d45;
+}
+.settings-categories > button:focus-visible {
+  outline-offset: -3px;
+}
+.settings-categories > button[aria-pressed="true"] {
+  color: #285d45;
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.settings-general,
+.settings-upload {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+.settings-site {
+  grid-row: span 2;
+}
+.settings-console .settings-panel {
+  padding: 24px;
+}
+.settings-console .settings-panel > h3 + .muted,
+.settings-console .field-help {
+  color: #596d65;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.settings-console .field-label {
+  margin-top: 18px;
+  font-size: 12px;
+}
+/* 画质滑条使用独立的轨道尺寸，不能套用普通输入框的内边距。 */
+.settings-console input:not([type="checkbox"]):not([type="range"]),
+.settings-console textarea {
+  padding: 9px 11px;
+  font-size: 13px;
+}
+.settings-console .rate-row input:not([type="checkbox"]) {
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.settings-console .select-trigger {
+  min-height: 36px;
+}
+.settings-console .rate-unit .select-trigger {
+  min-height: 34px;
+}
+.settings-runtime dl {
+  display: grid;
+  gap: 16px;
+  margin: 20px 0;
+}
+.settings-runtime dl > div,
+.settings-runtime dt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-runtime dl > div {
+  justify-content: space-between;
+  font-size: 12px;
+}
+.settings-runtime dt {
+  color: #596d65;
+}
+.settings-runtime dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.settings-backup {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-top: 16px;
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  color: #596d65;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.settings-backup svg {
+  margin-top: 2px;
+}
+@media (max-width: 1100px) {
+  .settings-general,
+  .settings-upload {
+    grid-template-columns: 1fr;
+  }
+  .settings-site {
+    grid-row: auto;
+  }
+}
+@media (max-width: 600px) {
+  .settings-categories {
+    gap: 18px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .settings-categories > button {
+    font-size: 12px;
+  }
+  .settings-console .settings-panel {
+    padding: 18px;
+  }
+}
 .storage-heading {
   margin-bottom: 22px;
   gap: 20px;

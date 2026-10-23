@@ -1,14 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import {
-  ArrowDownToLine,
   Check,
   ChevronRight,
   CircleAlert,
   Database,
   Folder,
   HardDrive,
-  Image as ImageIcon,
   Images,
   KeyRound,
   LoaderCircle,
@@ -29,6 +27,7 @@ import ResourceList from "./components/ResourceList.vue";
 import StorageSettings from "./components/StorageSettings.vue";
 import ProcessingSettings from "./components/ProcessingSettings.vue";
 import AccessSettings from "./components/AccessSettings.vue";
+import RateLimitSettings from "./components/RateLimitSettings.vue";
 import UserSettings from "./components/UserSettings.vue";
 import SiteSettings from "./components/SiteSettings.vue";
 import PublicGallery from "./components/PublicGallery.vue";
@@ -51,8 +50,6 @@ type View =
   | "security"
   | "settings"
   | "storages"
-  | "processing"
-  | "access"
   | "users"
   | "manageImages"
   | "manageShares"
@@ -101,8 +98,6 @@ const title = computed(
       security: "账号安全",
       settings: "系统设置",
       storages: "存储管理",
-      processing: "图片处理",
-      access: "访问控制",
       users: "用户管理",
       manageImages: "图片管理",
       manageShares: "分享管理",
@@ -121,8 +116,6 @@ const adminNavItems = [
   { key: "manageTokens" as View, label: "Token 管理", icon: KeyRound },
   { key: "users" as View, label: "用户管理", icon: ShieldCheck },
   { key: "storages" as View, label: "存储管理", icon: HardDrive },
-  { key: "processing" as View, label: "图片处理", icon: Sparkles },
-  { key: "access" as View, label: "访问控制", icon: ShieldCheck },
   { key: "settings" as View, label: "系统设置", icon: SettingsIcon },
 ];
 const storageLabel = computed(
@@ -131,6 +124,13 @@ const storageLabel = computed(
       settings.value?.database || "sqlite"
     ],
 );
+const settingsSection = ref("general");
+const settingsSections = [
+  { key: "general", label: "常规设置" },
+  { key: "upload", label: "上传与压缩" },
+  { key: "access", label: "访问控制" },
+  { key: "limits", label: "限频策略" },
+];
 const notifications = ref<{ id: number; text: string; error?: boolean }[]>([]);
 let notificationID = 0;
 const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -220,6 +220,7 @@ function clearSession() {
   confirmNewPassword.value = "";
   modal.value = "";
   view.value = "library";
+  settingsSection.value = "general";
 }
 async function logout() {
   try {
@@ -706,12 +707,6 @@ onBeforeUnmount(() => {
           @changed="refreshMeta"
           @notice="notice"
         />
-        <ProcessingSettings
-          v-if="view === 'processing' && isAdmin"
-          @changed="refreshMeta"
-          @notice="notice"
-        />
-        <AccessSettings v-if="view === 'access' && isAdmin" @notice="notice" />
         <UserSettings
           v-if="view === 'users' && isAdmin"
           :server-limit="settings?.max_upload_bytes || 20 * 1024 * 1024"
@@ -719,18 +714,41 @@ onBeforeUnmount(() => {
           @changed="refreshMeta"
           @notice="notice"
         />
-        <section v-if="view === 'settings' && isAdmin" class="settings-layout">
-          <div class="settings-main">
+        <section
+          v-if="view === 'settings' && isAdmin"
+          class="settings-console"
+          aria-label="系统设置"
+        >
+          <nav class="settings-categories" aria-label="设置分类">
+            <button
+              v-for="item in settingsSections"
+              :key="item.key"
+              type="button"
+              :aria-pressed="settingsSection === item.key"
+              :aria-controls="`settings-${item.key}`"
+              @click="settingsSection = item.key"
+            >
+              {{ item.label }}
+            </button>
+          </nav>
+          <!-- 切换分类只隐藏分区，保留尚未保存的表单内容。 -->
+          <div
+            id="settings-general"
+            v-show="settingsSection === 'general'"
+            class="settings-general"
+            role="region"
+            aria-label="常规设置"
+          >
             <SiteSettings
               v-if="settings"
+              class="settings-site"
               :settings="settings"
               @changed="refreshMeta"
               @reauthenticate="clearSession"
               @notice="notice"
             />
             <form
-              v-if="isAdmin"
-              class="panel settings-panel"
+              class="panel settings-panel settings-image"
               @submit.prevent="saveSettings"
             >
               <h3>图片访问</h3>
@@ -748,12 +766,48 @@ onBeforeUnmount(() => {
               </p>
               <div class="panel-actions">
                 <button class="button primary" :disabled="settingsBusy">
-                  {{ settingsBusy ? "正在保存…" : "保存设置" }}
+                  {{ settingsBusy ? "正在保存…" : "保存图片域名" }}
                 </button>
               </div>
             </form>
+            <aside
+              class="panel settings-panel settings-runtime"
+              aria-label="运行信息"
+            >
+              <h3>运行信息</h3>
+              <dl>
+                <div>
+                  <dt><Database :size="15" />数据库</dt>
+                  <dd>{{ storageLabel }}</dd>
+                </div>
+                <div>
+                  <dt><HardDrive :size="15" />默认存储</dt>
+                  <dd>
+                    {{
+                      settings?.storage_name ||
+                      (settings?.storage === "s3" ? "S3 兼容存储" : "本地磁盘")
+                    }}
+                  </dd>
+                </div>
+              </dl>
+              <p class="field-help">
+                数据库通过服务端配置管理，本地及 S3 存储请前往“存储管理”。
+              </p>
+              <p class="settings-backup">
+                <ShieldCheck :size="16" /><span
+                  >定期备份数据库、图片和主密钥，并验证可以恢复。</span
+                >
+              </p>
+            </aside>
+          </div>
+          <div
+            id="settings-upload"
+            v-show="settingsSection === 'upload'"
+            class="settings-upload"
+            role="region"
+            aria-label="上传与压缩"
+          >
             <form
-              v-if="isAdmin"
               class="panel settings-panel"
               @submit.prevent="saveUploadLimit"
             >
@@ -800,44 +854,24 @@ onBeforeUnmount(() => {
                 </button>
               </div>
             </form>
+            <ProcessingSettings @changed="refreshMeta" @notice="notice" />
           </div>
-          <aside v-if="isAdmin">
-            <div class="panel system-panel">
-              <h3>轻一点，刚刚好。</h3>
-              <dl>
-                <div>
-                  <dt><Database :size="15" />数据库</dt>
-                  <dd>{{ storageLabel }}</dd>
-                </div>
-                <div>
-                  <dt><HardDrive :size="15" />存储驱动</dt>
-                  <dd>
-                    {{
-                      settings?.storage === "s3" ? "S3 兼容存储" : "本地磁盘"
-                    }}
-                  </dd>
-                </div>
-                <div>
-                  <dt><ArrowDownToLine :size="15" />单张上限</dt>
-                  <dd>{{ bytes(settings?.max_upload_bytes || 0) }}</dd>
-                </div>
-                <div>
-                  <dt><ImageIcon :size="15" />像素上限</dt>
-                  <dd>{{ (settings?.max_pixels || 0) / 10000 }} 万</dd>
-                </div>
-              </dl>
-              <p class="field-help">
-                数据库通过服务端配置管理。可在存储管理中配置本地目录和 S3 存储。
-              </p>
-            </div>
-            <div class="backup-note">
-              <ShieldCheck :size="20" />
-              <div>
-                <strong>让收藏更安心</strong>
-                <p>定期备份数据库、图片、配置和主密钥，并验证可以恢复。</p>
-              </div>
-            </div>
-          </aside>
+          <div
+            id="settings-access"
+            v-show="settingsSection === 'access'"
+            role="region"
+            aria-label="访问控制设置"
+          >
+            <AccessSettings @notice="notice" />
+          </div>
+          <div
+            id="settings-limits"
+            v-show="settingsSection === 'limits'"
+            role="region"
+            aria-label="限频设置"
+          >
+            <RateLimitSettings @notice="notice" />
+          </div>
         </section>
         <section v-if="view === 'security'" class="account-security">
           <form class="panel settings-panel" @submit.prevent="changePassword">

@@ -46,8 +46,8 @@ async function save() {
 onMounted(load);
 </script>
 <template>
-  <section class="settings-layout">
-    <form class="panel settings-panel" @submit.prevent="save">
+  <section class="panel settings-panel processing-settings">
+    <form @submit.prevent="save">
       <h3>上传压缩</h3>
       <p class="muted">
         设置新上传图片的默认处理方式，也可以在上传时单独选择。
@@ -93,21 +93,45 @@ onMounted(load);
         </button>
       </p>
     </form>
-    <aside class="panel upload-notes">
-      <span class="eyebrow">SMALLER, WHEN IT HELPS</span>
-      <h3>只保存更小的结果</h3>
+    <details class="processing-help">
+      <summary>支持格式与处理规则</summary>
       <p>
         JPEG、PNG、静态 WebP、BMP、TIFF、ICO、AVIF、HEIC 和静态 JXL
-        支持原格式压缩或转 WebP，按画质处理并保留透明度。最多处理 400 万像素，超过时保留原文件。
+        支持原格式压缩或转 WebP，按画质处理并保留透明度。最多处理 400
+        万像素，超过时保留原文件。
       </p>
       <p>
         动画、SVG、多页 TIFF、高位深及已识别的特殊色彩配置保留原文件。多尺寸 ICO
         原格式压缩保留所有尺寸，转 WebP 取最大尺寸。JPEG 转换时校正 EXIF 方向。
       </p>
-      <div class="note-divider" />
       <p>
         压缩失败或体积没有变小，将保留原文件。压缩成功后不额外备份原文件；预览图和缩略图按需生成，已有图片不受影响。
       </p>
-    </aside>
+    </details>
   </section>
 </template>
+
+<style scoped>
+.processing-settings > form > h3 + .muted {
+  margin-top: 8px;
+  color: #596d65;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.processing-help {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  color: #596d65;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.processing-help summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 500;
+}
+.processing-help p {
+  margin-top: 12px;
+}
+</style>

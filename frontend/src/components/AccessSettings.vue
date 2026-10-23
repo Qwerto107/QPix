@@ -95,17 +95,19 @@ onMounted(load);
     <p v-if="error" class="form-error" role="alert">
       {{ error }} <button class="text-button" @click="load">重试</button>
     </p>
-    <div v-if="rules.length" class="settings-main">
+    <div v-if="rules.length" class="panel settings-panel access-rules">
       <form
         v-for="row in rules"
         :key="row.scope"
-        class="panel settings-panel access-rule-form"
+        class="access-rule-form"
         :aria-labelledby="`access-title-${row.scope}`"
         :aria-busy="busy === row.scope"
         @submit.prevent="save(row)"
       >
-        <h3 :id="`access-title-${row.scope}`">{{ labels[row.scope] }}</h3>
-        <p class="muted">{{ descriptions[row.scope] }}</p>
+        <div class="access-rule-description">
+          <h3 :id="`access-title-${row.scope}`">{{ labels[row.scope] }}</h3>
+          <p>{{ descriptions[row.scope] }}</p>
+        </div>
         <fieldset
           class="access-rule-fields"
           :disabled="!!busy"
@@ -196,3 +198,55 @@ onMounted(load);
     </div>
   </section>
 </template>
+
+<style scoped>
+.access-settings {
+  max-width: none;
+}
+.access-summary {
+  background: var(--mint);
+  border-radius: 10px;
+  padding: 12px 18px;
+  margin-bottom: 16px;
+  color: #496354;
+}
+.access-settings .access-rules {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.access-rule-form {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 32px;
+  padding: 24px 0;
+}
+.access-rule-form + .access-rule-form {
+  border-top: 1px solid var(--line);
+}
+.access-rule-description h3 {
+  font-size: 14px;
+}
+.access-rule-description p {
+  color: #596d65;
+  font-size: 12px;
+  line-height: 1.8;
+  margin-top: 8px;
+}
+.access-rule-fields {
+  margin: 0;
+}
+.access-rule-fields > .field-help {
+  margin-top: 12px;
+}
+.access-rule-fields .panel-actions {
+  margin-top: 16px;
+  padding-top: 0;
+  border: 0;
+}
+@media (max-width: 760px) {
+  .access-rule-form {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+}
+</style>
