@@ -2,126 +2,284 @@
 
 [文档中心](README.md) · [使用指南](usage.md) · [部署指南](deployment.md)
 
-API 接口位于 `/api/v1`，成功返回 JSON，失败返回 `{"error":"说明"}`。未登录返回 401，权限校验失败返回 403，参数错误返回 400，超过限流返回 429，超过上传大小或像素限制返回 413，不支持的图片返回 415。
-
-## 浏览器登录
-
-`POST /auth/login` 接受 `{"username":"admin","password":"..."}`，返回 `user` 与 `csrf_token`，同时设置 HttpOnly、SameSite=Strict 的会话 Cookie。会话有效期为 7 天。前端将 CSRF 值保存在内存，所有修改请求通过 `X-CSRF-Token` 提交；刷新页面用 `GET /auth/me` 恢复。
-
-管理员和普通用户统一使用 `/auth/login`、`/auth/me`、`/auth/logout`、`/auth/password`，无需提交账号类型。后端从数据库识别角色；管理员登录及会话操作使用 admin 网络规则，普通账号不应用图片直链规则。旧 `/member/auth/*` 路由已移除。User 返回 role、enabled、quota_bytes、max_file_bytes、default_album_id、created_at，不返回密码哈希。所有系统管理接口仅管理员会话可用；图库和 Token 接口也支持普通账号，但按权限过滤。
-
-服务不开放 CORS。开发使用 Vite 代理，生产使用同源反向代理；若在后台配置站点地址，浏览器写请求的 Origin 必须与其一致。客户端不应提交或伪造 Origin。登录每个来源 IP 每 15 分钟最多 15 次；只有配置可信代理后才使用对应 X-Forwarded-For，详见 [访问控制](deployment.md#访问控制)。
-
-## 接口清单
-
-| 方法与路径 | 请求 / 行为 |
+| 内容 | 章节 |
 | --- | --- |
-| GET /health | 公共健康检查，检查数据库连接 |
-| POST /auth/login | 登录 |
-| GET /auth/me | 当前账号和 CSRF 值 |
-| POST /auth/logout | 退出当前会话 |
-| PUT /auth/password | current_password、new_password；成功后撤销全部登录会话，保留 Token |
-| GET /images | page、limit（最多 100）、q、album_id、sort（created_at/name/size）、order（asc/desc）；默认本人，管理员可加 scope=all、user_id |
-| POST /images | multipart/form-data，每次一张，字段 file；可选 album_id、storage_id、compression（default / none / preserve / webp）、quality（1–100 整数） |
-| PATCH /images/{id} | name、album_id；album_id 传空字符串表示转入上传者默认相册，不能转入其他账号相册 |
-| POST /images/batch-delete | ids 数组，1–100 项；返回 deleted 数量和 failed ID 数组 |
-| POST /images/batch-move | ids 数组（1–100 项）、album_id；图片须属于同一上传者，目标为该账号相册 |
-| GET /albums | 本人相册与图片计数；管理员可加 scope=all、user_id |
-| POST /albums | name |
-| PATCH /albums/{id} | name |
-| DELETE /albums/{id} | 请求 action=move 与 target_id，或 action=delete；默认相册返回 409 |
-| GET /tokens | 分页列出元数据与前缀，支持 q、status、order、page、limit；管理员可加 scope=all、user_id，不返回 Token 明文或哈希 |
-| POST /tokens | 任意登录账号创建本人的 Token：name、expires_at、authorization；只在创建时返回完整 token |
-| PUT /tokens/{id} | 本人或管理员会话修改 name、expires_at、authorization；已撤销 Token 不可修改 |
-| DELETE /tokens/{id} | 本人撤销；管理员可撤销任意 Token，保留 revoked_at 记录 |
-| DELETE /tokens/{id}/record | 本人或管理员会话永久删除已撤销的 Token 记录；未撤销返回 409，无权或不存在返回 404 |
-| GET /stats | 本人 images、bytes、albums、today、pending_deletions；today 按 UTC 统计，管理员可加 scope=all |
-| GET /settings | 站点及图片域名、Cookie 策略、可信代理、上传大小／像素上限、数据库与默认存储信息 |
-| PATCH /settings | 部分更新 public_url、app_url、trusted_proxies、secure_cookie、max_upload_bytes、max_pixels；原子保存并即时生效，详见下方 |
-| GET /storages | 存储列表，包含 is_default、has_credentials、images，不含凭据 |
-| POST /storages | 新增配置，字段见下方 |
-| PUT /storages/{id} | 更新配置，凭据均留空保留原值；位置已被图片引用时不可改 |
-| DELETE /storages/{id} | 删除未引用、非默认且非初始 local 的配置，否则 409 |
-| POST /storages/{id}/default | 设为默认，配置必须启用 |
-| POST /storages/{id}/test | 写入、读取、删除探测对象，失败返回 502 |
-| GET /processing | mode（none / preserve / webp）、quality（1–100） |
-| PUT /processing | 保存 mode、quality，仅影响新上传 |
-| GET /access | items（三组规则）、requester_ip、referer_host、bypassed |
-| PUT /access/{scope} | 保存 admin / upload / images 的独立规则 |
-| GET /users | 管理员列出账号及 used_bytes |
-| POST /users | 管理员创建账号，role 为 user/admin，返回 200 与 id |
-| PUT /users/{id} | 管理员更新 role、enabled、quota_bytes、max_file_bytes；password 和 confirm_password 均为空保留密码 |
-| DELETE /users/{id} | 管理员删除其他账号；存在图片／分享、删除当前账号或最后一个启用管理员时返回 409 |
-| PUT /albums/{id}/access | guest_visible、referer_mode（inherit/custom/unrestricted）、referers（域名数组）、allow_empty_referer；本人或管理员可修改 |
-| PUT /albums/{id}/default | 将该账号拥有的相册设为默认 |
-| GET /upload-options | 登录账号的有效单张限制、容量用量、处理设置、可用存储名称与 ID |
-| GET /shares | 分页列出本人创建的单图分享，包含 url、has_password、expires_at、revoked_at、title；支持 q、status、order、page、limit，管理员可加 scope=all、user_id |
-| POST /shares | 本人创建单图分享，管理员可针对所有图片创建：kind=image、target_id、password（可选）、expires_at（RFC3339，可选/null） |
-| DELETE /shares/{id} | 本人撤销；管理员可撤销所有分享，返回 ok |
-| DELETE /shares/{id}/record | 永久删除已撤销分享及解锁会话；仅到期未撤销返回 409，无权或不存在返回 404；Token 需目标相册 share 权限 |
-| GET /public-shares/{token} | 未解锁返回 locked=true；解锁后返回 title、items、total、page、limit（36）、expires_at |
-| POST /public-shares/{token}/unlock | password；验证成功设置 HttpOnly Cookie，分享密码错误 403 |
+| 接入约定 | [请求与错误](#请求约定) · [登录会话](#登录会话) · [个人 Token](#用户-api-token) · [分页](#列表分页) |
+| 图片资源 | [上传与管理](#图片与上传) · [相册](#相册) · [分享](#单图分享) · [有效期](#有效期) · [图片访问](#图片访问) |
+| 后台接口 | [用户、设置、存储、图片处理与访问控制](#系统管理) |
 
-图片、分享和 Token 列表统一返回 `items`、`total`、`page`、`limit`。每张图片包含 id、name、album_id、format、size、original_size、optimized、compression_status、storage_id、width、height、created_at、url、thumbnail_url、can_manage。owner_id、owner_name、owner_role 仅管理员或上传者可见。分享和 Token 列表包含创建人字段；Token 额外返回 authorization、last_used_at、revoked_at。format / URL 后缀表示实际保存格式，name 保留显示名称。没有配置图片域名时 URL 为相对路径，客户端可用当前站点地址补全。
+## 请求约定
 
-账号创建字段：username、role（省略默认为 user）、enabled、quota_bytes、max_file_bytes、password、confirm_password。密码非空、最多 72 字节且确认一致，不强制最短长度或复杂度；更新使用完整配置，密码均留空时保留原值。初始化及修改本人密码也采用相同长度政策，分享密码可留空表示无需密码。容量与单张大小为字节，0 分别表示不限累计容量、跟随服务器单张上限。容量不足返回 409，超过单张限制返回 413。容量口径和预占行为见 [使用指南](usage.md#管理后台)。
+API 前缀为 `/api/v1`。下文表格省略此前缀，图片网关 `/i/`、分享图片 `/si/` 和前端分享页 `/s/` 除外。
 
-相册返回 guest_visible、can_upload、owner_id、owner_name、owner_role、is_default、referer_mode、referers、allow_empty_referer。无成员授权。guest_visible 只允许访客凭已知图片链接访问，不提供公开图库。网页或 Token 上传省略 album_id 时归入上传者当前默认相册。删除相册必须明确转移图片或连同图片删除；转移不改变上传人及容量归属。
+成功返回 JSON，错误返回 `{"error":"说明"}`。上传使用 multipart/form-data，其余带请求体的接口使用 JSON。
 
-服务器上传上限在管理员控制面板保存后立即对新请求生效，使用 settings 表的 max_upload_bytes 持久化，重启时从数据库恢复，不再读取旧上传上限环境变量。未提供可更新值或上传上限越界时拒绝；无效请求不会部分覆盖其他字段。GET /settings 返回服务器上限，GET /upload-options 返回当前账号与服务器两者中更小的有效上限。网页上传和上传 Token 使用同一校验，已经保存的图片不受调低上限影响。
+| 状态码 | 含义 |
+| --- | --- |
+| 400 | 参数错误或当前密码不正确 |
+| 401／403 | 未登录，或身份、权限、来源校验失败 |
+| 404 | 资源不存在或不可访问 |
+| 409 | 容量不足、资源仍有引用或操作状态冲突 |
+| 413 | 超过大小或像素上限 |
+| 415 | 不支持的图片格式 |
+| 429 | 请求过于频繁，可按 Retry-After 重试 |
+| 500 | 服务内部错误，具体原因记录在服务端日志 |
 
-`PATCH /settings` 的 `public_url`、`app_url` 为 HTTP(S) 源地址，不含路径、凭据或查询参数；空值使用当前站点／请求域名。`trusted_proxies` 为最多 200 项 IP/CIDR 数组，JSON 最多 2048 字节；`max_upload_bytes` 为 1–100 MiB 的整数字节数，`max_pixels` 为 100 万–1 亿的整数。
+服务不开放 CORS。浏览器与 API 使用同源地址，开发环境通过 Vite 代理。写请求校验 Origin；Bearer 请求同样受来源及对应 IP 规则约束。
 
-启用 `secure_cookie` 需当前 TLS 连接，或来自可信代理且 `X-Forwarded-Proto: https`。变更 Cookie 策略清理全部登录和分享解锁会话，返回 `reauthenticate=true`，客户端需重新登录；个人 Token 保留。旧运行参数环境变量不再读取。
+### 请求频率
 
-compression_status：original（未压缩）、optimized（采用压缩结果）、unsupported（不重新编码）、metadata（为保留精度/元数据而跳过）、pixel_limit（超过 400 万像素）、not_smaller（结果未变小）、failed（编码失败，保留原文件）。
+| 操作 | 计数范围 | 上限 |
+| --- | --- | --- |
+| 登录 | 来源 IP | 每 15 分钟 15 次 |
+| 分享解锁 | 来源 IP | 每 15 分钟 15 次 |
+| 上传图片 | 账号，会话与个人 Token 共用 | 每分钟 120 次 |
+| 创建分享 | 账号，会话与个人 Token 共用 | 每分钟 30 次 |
 
-compression 为 none 时保留原文件；preserve 保留 JPEG / PNG / 静态 WebP 格式压缩；webp 转为有损 WebP。省略或 default 使用全局默认方式，省略 quality 使用全局默认画质；显式提交的方式和画质优先，非法画质（含空字符串、小数、重复字段）返回 400。quality 表示画质，不是体积缩减百分比。PNG 量化 RGB 颜色并逐像素保留 alpha，画质 100 不减少色阶；WebP 有损编码保留透明通道。网页队列入队时固定参数，重试保持原参数。旧开发配置的 smart 默认模式在启动时解释为 webp，新请求不再接受 smart。
+超限返回 429，重试等待时间见 `Retry-After`。分享创建超限不影响已有分享访问。
 
-存储请求字段：name、kind（local / s3）、enabled、root（本地）、endpoint、region、bucket、prefix、path_style、access_key、secret_key（S3）。更新提交完整配置；不接受只读 id、images 等字段。连接探测最多 30 秒，之后最多 10 秒补偿清理。
+## 登录会话
 
-访问规则字段：scope（可省略，提供时须与路径一致）、ip_enabled、ips（字符串数组）、referer_enabled、referers（域名数组）、allow_empty_referer。每类最多 200 项；管理规则拒绝阻止当前请求的设置。`upload` 不支持 Referer，提交启用开关或非空域名数组返回 400。`images` 只约束 `/i/` 直链，不影响分享和普通用户 API；相册 `inherit` 使用此规则，默认未启用。上传 Token 同样遵守 upload IP 规则。系统管理、账号和 Token 管理接口只接受登录会话和 CSRF。
+管理员与普通用户统一登录，角色由后端识别。系统管理和 Token 管理接口只接受登录会话。
+
+| 方法与路径 | 请求或返回 |
+| --- | --- |
+| `POST /auth/login` | username、password；返回 user、csrf_token 并设置 Cookie |
+| `GET /auth/me` | 当前 user 和 csrf_token |
+| `POST /auth/logout` | 退出当前会话 |
+| `PUT /auth/password` | current_password、new_password；成功后撤销本人登录会话，保留个人 Token |
+| `GET /health` | 公共健康检查，包含数据库连接检查 |
+
+会话有效期 7 天，Cookie 使用 HttpOnly、SameSite=Strict。修改请求通过 `X-CSRF-Token` 提交 CSRF 值。刷新页面后使用 `/auth/me` 恢复，密码确认由网页完成，改密 API 接受表中两个字段。
+
+管理员登录及会话操作应用管理端网络规则；普通用户 API 不应用图片直链规则。代理地址解析见 [访问控制](deployment.md#访问控制)。
 
 ## 用户 API Token
 
-管理员与普通用户均可创建和使用个人 Token，仅允许操作本人授权相册，不继承管理员的全站权限。个人空间的“我的 Token”管理本人凭据；系统管理的“Token 管理”通过登录会话管理全体用户凭据。通过 `Authorization: Bearer <token>` 提交，不放入 URL；Token 请求不需要 Cookie 或 CSRF，但仍检查 Origin、账号状态及相册操作权限。上传适用 upload IP 规则，读取原图／缩略图直链适用 images 及相册 Referer 规则；普通 API 操作不应用图片规则。无效 Bearer 凭据不会回退到请求附带的有效 Cookie。
+通过 `Authorization: Bearer <token>` 提交 Token。Token 请求无需 Cookie 或 CSRF；无效 Bearer 不会回退到附带的 Cookie。
 
-`expires_at` 为 RFC3339，必须晚于当前时刻，统一存储 UTC；省略/null 为永久。Token 界面默认 90 天，分享默认永久；共用永久、1／6／12 小时、1／3／7／14／30／90／180／365 天、自定义日期选项。固定期限由界面在保存时计算为绝对时刻，API 不接受 `1h` 等期限字符串。撤销、到期或停用账号后失效，修改密码保留个人 Token。此前迁移已停用的旧管理员 Token 保持撤销状态，可创建新的个人 Token；旧普通用户 Token 保持全部本人相册仅上传。
+管理员和普通用户的个人 Token 都只操作本人授权相册，不继承全站管理权限。Token 不能访问 `/auth`、`/tokens` 或系统管理接口，也不接受 `scope=all`。
 
-创建/编辑权限字段示例（占位 ID 须替换为该用户的真实相册 ID）：
+### 授权字段
+
+创建或修改 Token 时，authorization 接受以下结构。相册 ID 需替换为该用户的真实相册 ID：
 
 ```json
 {
-  "name": "博客工具",
-  "expires_at": null,
-  "authorization": {
-    "all_albums": false,
-    "permissions": [],
-    "albums": [
-      {"album_id": "album-id", "permissions": ["read", "upload", "edit", "share"]}
-    ]
-  }
+  "all_albums": false,
+  "permissions": [],
+  "albums": [
+    {"album_id": "album-id", "permissions": ["read", "upload", "edit", "share"]}
+  ]
 }
 ```
 
-`all_albums=true` 使用顶层 permissions，albums 必须为空；`false` 使用 1–200 个相册的独立 permissions，顶层 permissions 必须为空。权限值为 read（读取图库、统计、原图和缩略图）、upload、edit（重命名/移动图片）、delete（删除图片）、albums（相册管理）、share（单图分享管理）。未知权限、空权限或其他用户相册返回 400。创建省略 authorization 时兼容为全部本人相册仅 upload；修改必须提供 authorization。
+| 字段 | 规则 |
+| --- | --- |
+| all_albums=true | 使用顶层 permissions，albums 为空；包括以后新建的本人相册 |
+| all_albums=false | 使用 albums 的独立授权，顶层 permissions 为空；最多 200 个本人相册 |
+| permissions | 非空权限数组；未知权限或其他用户相册返回 400 |
 
-Token 不接受 `scope=all`。读取列表与统计在数据库查询阶段按授权相册过滤。上传目标需 upload，省略 album_id 时默认相册也必须获授权；移动要求源 edit 与目标 upload；相册管理不能代替图片删除权限。没有所需操作权限返回 403；无法发现的具体目标通常返回 404。Token 不能访问任何 `/tokens`、`/auth` 或系统管理接口。
+| 权限 | 行为 |
+| --- | --- |
+| read | 读取授权图库、统计、原图和缩略图 |
+| upload | 上传至授权相册，包括省略 album_id 时的默认相册 |
+| edit | 重命名、移动图片；移动还需目标相册的 upload |
+| delete | 删除图片 |
+| albums | 管理相册；指定相册模式不能新建相册，连同图片删除还需 delete |
+| share | 管理授权相册中本人图片的分享 |
 
-上传每账号每分钟最多 120 请求，同时处理两张图片；429 可按 Retry-After 重试。更多规则见 [权限说明](usage.md)。
+创建时省略 authorization，默认为全部本人相册仅 upload；修改时必须提供。撤销 Token 不会撤销既有分享。脚本上传示例：
 
-```bash
+```sh
 curl -H "Authorization: Bearer $QPIX_TOKEN" \
   -F "file=@photo.png" \
+  -F "compression=preserve" \
+  -F "quality=82" \
   https://qpix.example.com/api/v1/images
 ```
 
-上传成功返回 201 和图片信息。多图上传客户端应拆分请求，建议最多两个并发；重复上传会产生独立记录，不做自动去重。
+### Token 管理接口
+
+以下接口需要登录会话。默认管理本人 Token，管理员列表可加 `scope=all` 和 `user_id`。
+
+| 方法与路径 | 请求或行为 |
+| --- | --- |
+| `GET /tokens` | 列表，支持 q、status、sort、order 和分页参数 |
+| `POST /tokens` | name、expires_at、authorization；仅创建时返回完整 token |
+| `PUT /tokens/{id}` | 修改 name、expires_at、authorization；已撤销不可修改 |
+| `DELETE /tokens/{id}` | 撤销并保留记录 |
+| `DELETE /tokens/{id}/record` | 永久删除已撤销记录；未撤销返回 409 |
+
+列表返回前缀及元数据，包括 authorization、last_used_at、revoked_at、创建人信息，不返回明文或哈希。持续使用时 last_used_at 最多约每分钟更新一次，权限、撤销及到期仍逐请求校验。
+
+## 列表分页
+
+图片、分享和 Token 列表默认只返回本人记录。管理员会话可用 `scope=all` 查看全站，并通过 `user_id` 筛选账号。
+
+| 参数 | 说明 |
+| --- | --- |
+| q | 搜索名称，保留子串匹配语义 |
+| limit | 每页最多 100 条；图片默认 36，分享和 Token 默认 20 |
+| order | asc 或 desc，默认 desc；相同排序值按 ID 降序 |
+| status | 分享和 Token 支持 active、expired、revoked |
+| pagination=cursor | 使用游标分页 |
+| cursor | 上一页返回的 next_cursor；首次省略 |
+
+游标模式首次返回 items、total、page、limit、has_more、next_cursor。下一页原样传回 next_cursor，并保持筛选、排序和每页数量不变。后续页 total 为 null，page 固定为 1；客户端按 has_more 判断结束。游标无效返回 400，每次请求仍重新检查权限。
+
+| 列表 | 游标排序 |
+| --- | --- |
+| 图片 | sort=created_at、name、size |
+| 分享 | 创建时间，使用 order 指定方向 |
+| Token | sort=created_at、name |
+
+默认按创建时间排序。未设置 `pagination=cursor` 时，使用 page、limit 和逐页计数。Token 页码模式还支持 expires_at、last_used_at 排序。
+
+## 图片与上传
+
+| 方法与路径 | 请求或返回 |
+| --- | --- |
+| `GET /images` | 分页图片列表；可加 album_id，`unfiled` 表示历史未归类图片 |
+| `POST /images` | 单张 multipart 上传，成功返回 201 和图片信息 |
+| `PATCH /images/{id}` | name、album_id；album_id 为空字符串时转入上传者默认相册 |
+| `POST /images/batch-move` | ids、album_id；1～100 张，同一上传者，目标为该账号相册 |
+| `POST /images/batch-delete` | ids，1～100 项；返回 deleted 数量和 failed ID 数组 |
+| `GET /upload-options` | 当前账号有效单张限制、容量、默认处理设置和可用存储 |
+| `GET /stats` | images、bytes、albums、today、pending_deletions；today 按 UTC 统计 |
+
+### 上传字段
+
+| 字段 | 说明 |
+| --- | --- |
+| file | 必填，每个请求一张图片 |
+| album_id | 省略时使用上传者当前默认相册，Token 也需具备该相册 upload 权限 |
+| storage_id | 省略时使用默认存储 |
+| compression | default、none、preserve、webp；省略或 default 使用后台默认值 |
+| quality | 1～100 的整数，省略使用默认画质 |
+
+none 保留原文件，preserve 保留原格式压缩，webp 转为有损 WebP。画质表示编码质量，透明通道保留；只有结果更小时才采用。空字符串、小数、重复或非法画质字段返回 400。格式及元数据处理见 [压缩细节](usage.md#压缩细节)。
+
+接收阶段最多 8 个全局在途请求、每账号 2 个，图片处理全局并发 2 个。多图客户端应拆分请求，建议最多两个并发。重复上传产生独立记录，不自动去重。
+
+### 图片字段
+
+每张图片包含 id、name、album_id、storage_id、format、size、original_size、optimized、compression_status、width、height、created_at、url、thumbnail_url 和 can_manage。owner_id、owner_name、owner_role 仅管理员或上传者可见。
+
+format 和链接后缀表示实际保存格式，name 是显示名称。未配置图片域名时，URL 为相对路径，客户端可补全当前站点地址。缩略图地址使用 thumbnail_url，不自行拼接后缀。
+
+| compression_status | 含义 |
+| --- | --- |
+| original | 保留原文件 |
+| optimized | 采用压缩结果 |
+| unsupported | 文件不重新编码 |
+| metadata | 为保留精度或元数据而跳过 |
+| pixel_limit | 超过 400 万压缩像素上限 |
+| not_smaller | 结果未变小 |
+| failed | 编码失败，保留原文件 |
+
+删除先标记 deleting，使直链及关联分享失效，再清理文件和记录。失败保留待删除记录，启动及每 10 分钟重试，也可用原 ID 再次调用批量删除。容量不足返回 409，超过单张或像素限制返回 413。
+
+## 相册
+
+| 方法与路径 | 请求或行为 |
+| --- | --- |
+| `GET /albums` | 本人相册及图片计数；管理员可加 scope=all、user_id |
+| `POST /albums` | name |
+| `PATCH /albums/{id}` | name |
+| `PUT /albums/{id}/default` | 将该账号拥有的相册设为默认 |
+| `PUT /albums/{id}/access` | guest_visible、referer_mode、referers、allow_empty_referer |
+| `DELETE /albums/{id}` | action=move 和 target_id，或 action=delete；默认相册返回 409 |
+
+相册返回 guest_visible、can_upload、owner_id、owner_name、owner_role、is_default 及 Referer 配置。referer_mode 为 inherit、custom 或 unrestricted。referers 为域名数组。
+
+guest_visible 仅允许访客通过已知图片链接访问，不提供公开目录或成员授权。普通用户只管理本人相册，管理员可管理全部。转移图片不改变上传人和容量归属。
+
+## 单图分享
+
+| 方法与路径 | 请求或返回 |
+| --- | --- |
+| `GET /shares` | 本人分享列表，支持分页、q、status、order；管理员可加 scope=all、user_id |
+| `POST /shares` | kind=image、target_id、可选 password、expires_at |
+| `DELETE /shares/{id}` | 撤销，保留记录 |
+| `DELETE /shares/{id}/record` | 永久删除已撤销记录及解锁会话；仅到期未撤销返回 409 |
+| `GET /public-shares/{token}` | 未解锁返回 locked=true；解锁后返回 title、items、total、page、limit（36）、expires_at |
+| `POST /public-shares/{token}/unlock` | password；成功设置 HttpOnly Cookie，密码错误返回 403 |
+
+分享列表包含 url、has_password、expires_at、revoked_at、title 及创建人信息。本人管理本人分享，管理员会话可针对所有图片创建和管理；Token 需目标相册 share 权限。
+
+## 有效期
+
+Token 和分享的 expires_at 接受 RFC3339 时间，保存为 UTC，必须晚于当前时刻；省略或 null 表示永久。API 接受绝对时刻，网页负责把常用期限换算为时刻。
+
+网页 Token 默认 90 天，分享默认永久。分享 password 可空；非空密码最多 72 字节。
 
 ## 图片访问
 
-`GET /i/{id}.{format}` 访问保存的图片，`GET /i/{id}-thumb.png` 访问缩略图，也支持 HEAD。访客仅可访问允许访客的相册图片；私有图片仅所有者／管理员会话，或具备对应相册 read 权限的个人 Token 可访问。历史未归类图片仍仅上传者／管理员可见，无权限返回 404。返回真实 Content-Type、nosniff、ETag，始终 private, no-store，访问校验先于 304。
+| 路径 | 说明 |
+| --- | --- |
+| `GET/HEAD /i/{id}.{format}` | 保存的图片 |
+| `GET/HEAD /i/{id}-thumb.jpg` 或 `.png` | 缩略图；小图可能复用原图 |
+| `GET/HEAD /si/{token}/{file}` | 分享目标图片，校验分享解锁状态及期限 |
+| `/s/{token}` | 前端分享页 |
 
-分享资源使用 `GET/HEAD /si/{token}/{file}`，仅可读取分享目标中的图片。每次检查密码解锁 Cookie、撤销状态与期限；不能用其他图片 ID 绕过目标范围。分享不存在、到期、撤销或目标删除返回 404；未解锁不会返回图片列表或内容。口令验证按来源 IP 每 15 分钟最多 15 次。分享页为前端 `/s/{token}`；令牌不在查询参数中传播。已下载副本不受撤销控制。
+访客直链需相册允许访客访问。私有直链仅限所有者、管理员会话或具备相册 read 权限的个人 Token；历史未归类图片仅上传者或管理员可见。不可访问时返回 404。
 
-删除先将记录设为 deleting，停止外链访问，再清理文件和记录。文件清理失败时保留待删除记录，服务启动及每 10 分钟重试；同样可以用原 ID 再次调用批量删除。
+返回真实 Content-Type、nosniff 和 ETag。无有效网络限制、未携带 Token 的公开直链使用 `private, no-cache, must-revalidate`；其他图片和分享使用 `private, no-store`。权限校验先于 304，ETag 匹配时不读取存储对象。
+
+分享图片独立检查密码 Cookie、目标范围、到期、撤销和删除状态，不应用直链的 IP／Referer 规则。无效分享返回 404，已下载副本不受撤销控制。
+
+## 系统管理
+
+本节接口只允许管理员登录会话，并要求修改请求提交 CSRF。
+
+### 用户
+
+| 方法与路径 | 行为 |
+| --- | --- |
+| `GET /users` | 账号列表及 used_bytes |
+| `POST /users` | 创建账号，返回 200 和 id |
+| `PUT /users/{id}` | 更新完整账号配置；密码两项均留空时保留原值 |
+| `DELETE /users/{id}` | 删除其他账号；有图片或分享、当前账号或最后一个启用管理员时返回 409 |
+
+账号字段为 username、role（user／admin，创建省略默认为 user）、enabled、quota_bytes、max_file_bytes、password、confirm_password。密码非空、最多 72 字节且确认一致。容量和大小单位为字节，0 分别表示不限累计容量、跟随服务器单张上限。容量口径见 [使用指南](usage.md#容量与上传限制)。
+
+### 站点设置
+
+`GET /settings` 返回站点与图片地址、Cookie 策略、代理、上传限制、数据库、默认存储、处理配置及版本信息。`PATCH /settings` 部分更新以下字段：
+
+| 字段 | 约束 |
+| --- | --- |
+| app_url、public_url | HTTP(S) 源地址，不含路径、凭据或查询参数；空值使用当前站点／请求地址 |
+| trusted_proxies | 最多 200 项 IP／CIDR 数组，JSON 最多 2048 字节 |
+| secure_cookie | 启用时，当前请求须为 TLS，或来自可信代理且 X-Forwarded-Proto=https |
+| max_upload_bytes | 1～100 MiB 的整数字节数 |
+| max_pixels | 100 万～1 亿的整数 |
+
+设置原子保存并持久化，无效请求不部分覆盖。更改 Cookie 策略清理全部登录和分享解锁会话，返回 reauthenticate=true，个人 Token 保留。上传有效单张上限取服务器和用户限制中的较小者；网页与 Token 使用同一校验。
+
+### 存储
+
+| 方法与路径 | 行为 |
+| --- | --- |
+| `GET /storages` | 配置列表，含 is_default、has_credentials、images，不含凭据 |
+| `POST /storages` | 新增配置 |
+| `PUT /storages/{id}` | 更新完整配置；凭据两项均留空时保留原值 |
+| `DELETE /storages/{id}` | 删除未引用、非默认且非初始 local 的配置，否则 409 |
+| `POST /storages/{id}/default` | 将已启用配置设为默认 |
+| `POST /storages/{id}/test` | 写入、读取、删除探测对象；失败返回 502 |
+
+请求字段为 name、kind（local／s3）、enabled、root、endpoint、region、bucket、prefix、path_style、access_key、secret_key。root 用于本地，后续字段用于 S3。不接受 id、images 等只读字段；存在图片引用时不可更改存储位置或类型。连接探测最多 30 秒，补偿清理最多 10 秒。
+
+### 图片处理与访问控制
+
+| 方法与路径 | 请求或返回 |
+| --- | --- |
+| `GET /processing` | mode、quality |
+| `PUT /processing` | mode=none／preserve／webp，quality=1～100；仅影响新上传 |
+| `GET /access` | items（三组规则）、requester_ip、referer_host、bypassed |
+| `PUT /access/{scope}` | 保存 admin、upload 或 images 规则 |
+
+规则字段为 scope、ip_enabled、ips、referer_enabled、referers、allow_empty_referer。scope 可省略，提供时需与路径一致。两类名单各最多 200 项，管理规则拒绝会阻止当前请求的设置。
+
+upload 只支持 IP；启用 Referer 或提交非空 Referer 名单返回 400。images 只约束 `/i/`；分享与普通用户 API 使用各自规则。相册 inherit 使用全局图片直链规则。完整语义见 [访问控制](deployment.md#访问控制)。
