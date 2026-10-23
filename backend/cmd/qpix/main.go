@@ -63,6 +63,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if cfg.DisableAccessRules {
+		slog.Warn("网络访问规则已通过 QPIX_DISABLE_ACCESS_RULES 临时关闭，修正规则后请关闭该开关并重启", "access_rules_disabled", true)
+	}
 	db, err := database.Open(cfg.DBDriver, cfg.DSN)
 	if err != nil {
 		return err
