@@ -79,8 +79,10 @@ go build -tags='nodynamic,with_frontend' -trimpath -ldflags='-s -w' -o qpix.exe 
 在仓库根目录执行：
 
 ```sh
-docker build -t qpix:local .
+docker build --build-arg QPIX_COMMIT_HASH="$(git rev-parse HEAD)" -t qpix:local .
 ```
+
+浏览器控制台显示版本及 8 位提交哈希。构建时优先读取 `QPIX_COMMIT_HASH`、`GITHUB_SHA`，否则读取当前 Git 提交；缺少元数据时显示 `unknown`。Docker 源码构建通过上述参数传入哈希，CI 发布镜像复用已包含哈希的前端产物。
 
 按 [部署指南](deployment.md) 准备可写的数据目录和 `.env`。把 Compose 的 image 改为 `qpix:local`，执行 `docker compose up -d --pull never`。
 

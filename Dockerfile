@@ -4,6 +4,7 @@ WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
+ARG QPIX_COMMIT_HASH
 RUN npm run build
 WORKDIR /src
 COPY scripts/ ./scripts/
