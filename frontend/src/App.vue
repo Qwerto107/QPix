@@ -683,6 +683,7 @@ onBeforeUnmount(() => {
           :default-storage="uploadOptions?.default_storage || 'local'"
           :default-compression="uploadOptions?.processing.mode || 'none'"
           :default-quality="uploadOptions?.processing.quality ?? 82"
+          :formats="uploadOptions?.formats || []"
           @uploaded="uploaded"
           @notice="notice"
         />

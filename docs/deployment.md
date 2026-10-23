@@ -56,7 +56,7 @@ Compose 使用 `./data:/data` 绑定宿主机目录：
 | 容器路径 | 内容 |
 | --- | --- |
 | `/data/qpix.db` 及 WAL 文件 | SQLite 数据库，包含账号、图片元数据和后台设置 |
-| `/data/uploads` | 初始本地存储的原图与缩略图 |
+| `/data/uploads` | 初始本地存储的原图、预览图与缩略图 |
 | `/data/master.key` | 解密 S3 凭据和分享令牌所需的主密钥 |
 
 容器以非 root 用户运行，根文件系统只读，`/data` 和 `/tmp` 可写。新增本地存储时，需要将实际目录挂载进容器，并授予写入权限。数据库使用本机磁盘，数据和密钥放在前端静态目录之外。
@@ -159,13 +159,12 @@ location / {
     client_max_body_size 101m;
     proxy_read_timeout 120s;
 
-    proxy_hide_header Content-Security-Policy;
     add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: https://img.example.com; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
     add_header Strict-Transport-Security "max-age=31536000" always;
 }
 ```
 
-`101m` 为最大 100 MiB 图片及 multipart 开销预留空间，外层网关也需放行。保持应用的 Cache-Control、nosniff 和 Referrer-Policy，关闭图片与分享路径的共享缓存。已有 `add_header` 配置时合并保留，注意 Nginx 层级继承规则。
+`101m` 为最大 100 MiB 图片及 multipart 开销预留空间，外层网关也需放行。保持应用的 Cache-Control、nosniff、Referrer-Policy 和 Content-Disposition，关闭图片与分享路径的共享缓存。保留上游 CSP，尤其是 SVG 的 sandbox 限制；外层站点 CSP 可作为额外策略同时发送。已有 `add_header` 配置时合并保留，注意 Nginx 层级继承规则。
 
 HTTP 入口重定向到 HTTPS。启用 HSTS 前确认 TLS 和证书续期可用；确认全部子域支持 HTTPS 后，再考虑 `includeSubDomains`。当前页面需要 CSP 中的内联样式许可。
 
@@ -183,7 +182,7 @@ HTTP 入口重定向到 HTTPS。启用 HSTS 前确认 TLS 和证书续期可用�
 | --- | --- |
 | 管理端 | 管理员登录及会话操作；前端静态页面和普通用户登录不受此组限制 |
 | 上传接口 | `POST /api/v1/images`，检查 IP 和登录／Token 身份，不检查 Referer |
-| 图片直链 | `/i/` 原图与缩略图，检查 IP 和有效 Referer；不约束普通 API、分享页或 `/si/` |
+| 图片直链 | `/i/` 原图、预览图与缩略图，检查 IP 和有效 Referer；不约束普通 API、分享页或 `/si/` |
 
 三组规则默认关闭，分别保存。IP 支持 IPv4、IPv6 和 CIDR；Referer 填域名或 IP，不含协议、端口和路径。`*.example.com` 包含子域名，不包含 `example.com`。IP 和 Referer 同时启用时，两项都须满足。
 
@@ -230,7 +229,7 @@ tmpfs 按实际写入占用内存，上限不等于预分配量。容器总内�
 
 ## 备份与恢复
 
-备份范围包括数据库、所有存储的原图与缩略图、部署配置和原主密钥。S3 使用供应商备份或版本策略。
+备份范围包括数据库、所有存储的原图、预览图与缩略图、部署配置和原主密钥。S3 使用供应商备份或版本策略。
 
 SQLite 可停止应用后备份整个 `data/`。运行中的 WAL 可能包含已提交数据，在线备份需使用 SQLite Backup API 或 VACUUM INTO。仅数据库快照无法保证图片与数据库一致，应结合存储快照或暂停写入。
 
@@ -269,4 +268,4 @@ docker compose start qpix
 | 图片直链无法访问 | 检查相册访客权限、图片 IP／Referer 规则及当前身份 |
 | 已删除图片仍占容量 | 检查后台待清理记录、存储权限及日志，等待重试成功 |
 
-待删除图片在启动时及每 10 分钟重试。出现孤立文件时，暂停写入，按存储 ID、对象 key 和缩略图 key 对照元数据，先隔离无引用对象；保留数据库记录以便重试清理。
+待删除图片在启动时及每 10 分钟重试。出现孤立文件时，暂停写入，按存储 ID、原图、预览图和缩略图 key 对照元数据，先隔离无引用对象；保留数据库记录以便重试清理。

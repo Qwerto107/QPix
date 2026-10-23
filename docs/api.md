@@ -145,7 +145,7 @@ curl -H "Authorization: Bearer $QPIX_TOKEN" \
 | `PATCH /images/{id}` | name、album_id；album_id 为空字符串时转入上传者默认相册 |
 | `POST /images/batch-move` | ids、album_id；1～100 张，同一上传者，目标为该账号相册 |
 | `POST /images/batch-delete` | ids，1～100 项；返回 deleted 数量和 failed ID 数组 |
-| `GET /upload-options` | 当前账号有效单张限制、容量、默认处理设置和可用存储 |
+| `GET /upload-options` | 当前账号有效单张限制、容量、默认处理设置、可用存储和 formats 扩展名数组 |
 | `GET /stats` | images、bytes、albums、today、pending_deletions；today 按 UTC 统计 |
 
 ### 上传字段
@@ -164,9 +164,9 @@ none 保留原文件，preserve 保留原格式压缩，webp 转为有损 WebP�
 
 ### 图片字段
 
-每张图片包含 id、name、album_id、storage_id、format、size、original_size、optimized、compression_status、width、height、created_at、url、thumbnail_url 和 can_manage。owner_id、owner_name、owner_role 仅管理员或上传者可见。
+每张图片包含 id、name、album_id、storage_id、format、size、original_size、optimized、compression_status、width、height、created_at、url、preview_url、thumbnail_url 和 can_manage。owner_id、owner_name、owner_role 仅管理员或上传者可见。
 
-format 和链接后缀表示实际保存格式，name 是显示名称。未配置图片域名时，URL 为相对路径，客户端可补全当前站点地址。缩略图地址使用 thumbnail_url，不自行拼接后缀。
+format 和链接后缀表示实际保存格式，name 是显示名称。未配置图片域名时，URL 为相对路径，客户端可补全当前站点地址。预览和缩略图使用返回的 preview_url、thumbnail_url，不自行拼接后缀；无法生成时可为空。分享返回的这些地址使用 `/si/`，同样校验密码和期限。
 
 | compression_status | 含义 |
 | --- | --- |
@@ -220,12 +220,15 @@ Token 和分享的 expires_at 接受 RFC3339 时间，保存为 UTC，必须晚�
 | --- | --- |
 | `GET/HEAD /i/{id}.{format}` | 保存的图片 |
 | `GET/HEAD /i/{id}-thumb.jpg` 或 `.png` | 缩略图；小图可能复用原图 |
+| `GET/HEAD /i/{id}-preview.jpg` 或 `.png` | 独立预览，最长边 1920 px；仅部分格式生成 |
 | `GET/HEAD /si/{token}/{file}` | 分享目标图片，校验分享解锁状态及期限 |
 | `/s/{token}` | 前端分享页 |
 
 访客直链需相册允许访客访问。私有直链仅限所有者、管理员会话或具备相册 read 权限的个人 Token；历史未归类图片仅上传者或管理员可见。不可访问时返回 404。
 
 返回真实 Content-Type、nosniff 和 ETag。无有效网络限制、未携带 Token 的公开直链使用 `private, no-cache, must-revalidate`；其他图片和分享使用 `private, no-store`。权限校验先于 304，ETag 匹配时不读取存储对象。
+
+预览图和缩略图沿用原图的权限、Referer 和删除状态。SVG 原文件额外返回 `Content-Disposition: attachment` 及限制执行的 CSP；反向代理需保留这些响应头。
 
 分享图片独立检查密码 Cookie、目标范围、到期、撤销和删除状态，不应用直链的 IP／Referer 规则。无效分享返回 404，已下载副本不受撤销控制。
 

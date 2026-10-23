@@ -97,17 +97,16 @@ onMounted(load);
       <span class="eyebrow">SMALLER, WHEN IT HELPS</span>
       <h3>只保存更小的结果</h3>
       <p>
-        原格式压缩保留 JPEG、PNG、静态 WebP 的格式；也可统一转换为有损 WebP。
-        两种方式均按所选画质处理并保留透明度。尺寸不缩放。为控制内存，最多处理
-        400 万像素，超过时保留原文件。
+        JPEG、PNG、静态 WebP、BMP、TIFF、ICO、AVIF、HEIC 和静态 JXL
+        支持原格式压缩或转 WebP，按画质处理并保留透明度。最多处理 400 万像素，超过时保留原文件。
       </p>
       <p>
-        GIF、APNG、16 位 PNG 和含特殊色彩配置的图片保留原文件。JPEG 转换时校正
-        EXIF 方向。
+        动画、SVG、多页 TIFF、高位深及已识别的特殊色彩配置保留原文件。多尺寸 ICO
+        原格式压缩保留所有尺寸，转 WebP 取最大尺寸。JPEG 转换时校正 EXIF 方向。
       </p>
       <div class="note-divider" />
       <p>
-        压缩失败或体积没有变小，将保留原文件。压缩成功时仅保存处理后的图片及缩略图，不额外备份原文件；已有图片不受影响。
+        压缩失败或体积没有变小，将保留原文件。压缩成功后不额外备份原文件；预览图和缩略图按需生成，已有图片不受影响。
       </p>
     </aside>
   </section>

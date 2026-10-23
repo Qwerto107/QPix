@@ -28,6 +28,7 @@ export interface ImageItem {
   created_at: string;
   url: string;
   thumbnail_url: string;
+  preview_url: string;
 }
 export interface Album {
   guest_visible: boolean;
@@ -123,6 +124,7 @@ export interface AccessRule {
 }
 
 export interface UploadOptions {
+  formats: string[];
   max_upload_bytes: number;
   max_pixels: number;
   default_storage: string;

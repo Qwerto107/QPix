@@ -6,7 +6,7 @@
 
 ## 环境与结构
 
-使用 Go 1.26 系列（工具链见 `backend/go.mod`）、Node.js 24 和 npm。SQLite 和图片编解码使用纯 Go 实现，发行构建关闭 CGO。依赖由 `go.sum` 和 `package-lock.json` 固定。
+使用 Go 1.26.4 或更高版本（工具链见 `backend/go.mod`）、Node.js 24 和 npm。SQLite 和图片编解码使用 Go／内嵌 WASM，发行构建关闭 CGO，无需安装外部编解码程序。依赖由 `go.sum` 和 `package-lock.json` 固定。
 
 ```text
 backend/
@@ -72,7 +72,7 @@ $env:CGO_ENABLED = '0'
 go build -tags='nodynamic,with_frontend' -trimpath -ldflags='-s -w' -o qpix.exe ./cmd/qpix
 ```
 
-`nodynamic` 使用纯 Go 图片编码路径，`with_frontend` 内嵌页面。准备脚本只替换固定生成目录，并拒绝隐藏配置、源码映射、依赖目录和符号链接。生成的程序与 [发行程序](binary.md) 使用同一启动配置。
+`nodynamic` 使用 Go／内嵌图片编码路径，`with_frontend` 内嵌页面。准备脚本只替换固定生成目录，并拒绝隐藏配置、源码映射、依赖目录和符号链接。生成的程序与 [发行程序](binary.md) 使用同一启动配置。
 
 ### 构建本地镜像
 
@@ -133,6 +133,8 @@ SQLite 的连接级 PRAGMA 由内部 DSN 设置，每次建连都会应用。迁
 
 GORM 自动时间和 SQLite 绑定时间统一为 UTC，SQLite 保留原驱动文本格式。迁移版本 9 规范既有时间字段，避免游标及今日统计混用时区；测试需包含非 UTC 时间。
 
+迁移版本 10 增加可空的 `preview_key`。旧图片及缩略图继续可读，升级不会批量生成预览。
+
 ### 列表分页
 
 图库、分享和 Token 列表使用游标分页。网页保存已访问页的游标支持上一页，总数来自最近一次首页请求；筛选变化或刷新后重取首页。接口参数、排序和空总数约定见 [API 参考](api.md#列表分页)。
@@ -145,11 +147,15 @@ GORM 自动时间和 SQLite 绑定时间统一为 UTC，SQLite 保留原驱动�
 
 PNG 使用色阶量化与 DEFLATE，画质 100 保留完整 8 位色阶；量化对 NRGBA、RGBA 使用 Pix 快路径，并保留透明度。JPEG、PNG 可并行，WebP 编码保留独立互斥。
 
+BMP／TIFF 使用 `x/image`，ICO 使用有界目录校验及 PNG 帧编码。AVIF 使用 `gen2brain/avif` 内嵌 WASM，HEIC 使用 `gen2brain/h265/heic`，静态 JXL 使用 `gen2brain/jxl`。SVG 先校验 XML，再尝试用 `oksvg`／`rasterx` 生成静态缩略图；不支持的绘图特性由浏览器预览原文件。动画和多页文件避免重编码，ICO 转 WebP 显式取最大尺寸。
+
+原文件、独立预览和缩略图都用同一个 ID 的不同后缀保存，失败补偿及删除清理覆盖三类对象。
+
 ### 缩略图
 
-缩略图最长边为 480 px。不透明图片使用 JPEG，含透明度的图片使用 PNG。双边不超过 480 px、体积不超过 128 KiB 的非 GIF 图片直接复用原图，GIF 单独生成首帧缩略图。
+缩略图最长边为 480 px。不透明图片使用 JPEG，含透明度的图片使用 PNG。双边不超过 480 px、体积不超过 128 KiB 的 JPEG、PNG 和 ICO 直接复用原图。GIF、动画 WebP 单独生成首帧缩略图。
 
-旧 PNG 缩略图继续可读。客户端使用 API 返回的 `thumbnail_url`，不自行推断格式和后缀。
+浏览器兼容性有限的格式另生成最长边 1920 px 的详情预览，使用相同的透明度判断。旧 PNG 缩略图继续可读。客户端使用 API 返回的 `preview_url` 和 `thumbnail_url`，不自行推断格式和后缀。预览经过同一个网关检查身份、相册及分享权限。
 
 ## 协作约定
 

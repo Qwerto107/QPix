@@ -261,6 +261,7 @@ func TestLifecycle(t *testing.T) {
 				t.Fatal("物理删除成功后未结算用量", used, err)
 			}
 			c.request("GET", "/api/v1/stats", nil, 200)
+			testFormatPreviews(t, a, c)
 			testSecurityRequests(t, a, c, fixture)
 			testFeatures(t, a, c, root, fixture)
 			testPasswordPolicyAndTokenExpiry(t, a, c, fixture)

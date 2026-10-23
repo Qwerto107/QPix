@@ -32,6 +32,7 @@ type imageView struct {
 	database.Image
 	URL          string `json:"url"`
 	ThumbnailURL string `json:"thumbnail_url"`
+	PreviewURL   string `json:"preview_url"`
 	OwnerName    string `json:"owner_name,omitempty"`
 	OwnerRole    string `json:"owner_role,omitempty"`
 	OwnerID      string `json:"owner_id,omitempty"`
@@ -43,12 +44,30 @@ func (a *App) imageView(row database.Image) imageView {
 	base := a.publicURL
 	a.settingsMu.RUnlock()
 	u := base + "/i/" + row.ID + "." + row.Format
-	thumb := base + "/i/" + thumbnailFile(row)
-	return imageView{Image: row, URL: u, ThumbnailURL: thumb}
+	preview := ""
+	if processing.BrowserImage(row.Format) {
+		preview = u
+	}
+	if row.PreviewKey != "" {
+		preview = base + "/i/" + previewFile(row)
+	}
+	thumb := ""
+	if row.ThumbKey != "" || preview != "" {
+		thumb = base + "/i/" + thumbnailFile(row)
+	}
+	if preview == "" && row.ThumbKey != "" {
+		preview = thumb
+	}
+	return imageView{Image: row, URL: u, ThumbnailURL: thumb, PreviewURL: preview}
 }
+
+func previewFile(row database.Image) string { return row.ID + "-preview" + path.Ext(row.PreviewKey) }
 
 func thumbnailFile(row database.Image) string {
 	if row.ThumbKey == "" {
+		if row.PreviewKey != "" {
+			return previewFile(row)
+		}
 		return row.ID + "." + row.Format
 	}
 	return row.ID + "-thumb" + path.Ext(row.ThumbKey)
@@ -216,8 +235,8 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 	}
 	defer file.Close()
 	info, format, err := processing.ConfigReader(file)
-	if err != nil || (format != "jpeg" && format != "png" && format != "gif" && format != "webp") {
-		fail(w, 415, "仅支持有效的 JPEG、PNG、GIF、静态 WebP 图片")
+	if err != nil || !processing.Supported(format) {
+		fail(w, 415, "图片格式无效或暂不支持，请查看上传格式说明")
 		return
 	}
 	if info.Width <= 0 || info.Height <= 0 || int64(info.Width) > a.pixelLimit()/int64(info.Height) {
@@ -229,11 +248,11 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		return
 	}
 	decoded, err := processing.DecodeReader(file, format)
-	if err != nil {
+	if err != nil && format != "svg" {
 		fail(w, 415, "图片内容不完整或格式暂不支持")
 		return
 	}
-	if int64(decoded.Bounds().Dx())*int64(decoded.Bounds().Dy()) != int64(info.Width)*int64(info.Height) {
+	if decoded != nil && format != "svg" && int64(decoded.Bounds().Dx())*int64(decoded.Bounds().Dy()) != int64(info.Width)*int64(info.Height) {
 		fail(w, 415, "图片尺寸校验失败")
 		return
 	}
@@ -288,7 +307,7 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 	var data []byte
 	if mode != "none" {
 		switch {
-		case format == "gif":
+		case format == "gif" || format == "svg" || decoded == nil:
 			status = "unsupported"
 		case int64(info.Width)*int64(info.Height) > processing.MaxPixels:
 			status = "pixel_limit"
@@ -331,7 +350,7 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		if !committed {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			for _, key := range []string{row.Key, row.ThumbKey} {
+			for _, key := range []string{row.Key, row.ThumbKey, row.PreviewKey} {
 				if key != "" {
 					if err := store.Delete(ctx, key); err != nil {
 						slog.Error("上传失败后清理文件失败", "key", key, "error", err)
@@ -344,7 +363,27 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		internal(w, err)
 		return
 	}
-	thumb, thumbFormat, err := thumbnail(decoded, format, row.Size)
+	if decoded != nil && (!processing.BrowserImage(format) || format == "ico" || format == "avif") {
+		preview, previewFormat, previewErr := rasterPreview(decoded, 1920)
+		if previewErr == nil {
+			key := folder + id + "-preview." + previewFormat
+			// 先记录随机键，失败补偿和后续删除必须覆盖预览对象。
+			row.PreviewKey = key
+			if err = store.Put(r.Context(), key, bytes.NewReader(preview)); err != nil {
+				internal(w, err)
+				return
+			}
+		} else {
+			slog.Warn("生成详情预览失败", "image_id", id, "error", previewErr)
+		}
+	}
+	var thumb []byte
+	var thumbFormat string
+	if decoded != nil {
+		thumb, thumbFormat, err = thumbnail(decoded, format, row.Size)
+	} else {
+		err = nil
+	}
 	if err != nil {
 		slog.Warn("缩略图生成失败，使用原图", "image_id", id, "error", err)
 	} else if len(thumb) > 0 {
@@ -451,16 +490,22 @@ func thumbnail(source image.Image, format string, size int64) ([]byte, string, e
 	bounds := source.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
 	// 小尺寸但体积大的图片仍生成缩略图，避免列表反复下载大块元数据或原图尾部数据。
-	if width <= 480 && height <= 480 && size <= 128<<10 && format != "gif" {
+	if width <= 480 && height <= 480 && size <= 128<<10 && (format == "jpg" || format == "jpeg" || format == "png" || format == "ico") {
 		return nil, "", nil
 	}
-	if width > 480 || height > 480 {
+	return rasterPreview(source, 480)
+}
+
+func rasterPreview(source image.Image, maxSide int) ([]byte, string, error) {
+	bounds := source.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width > maxSide || height > maxSide {
 		if width >= height {
-			height = max(1, height*480/width)
-			width = 480
+			height = max(1, height*maxSide/width)
+			width = maxSide
 		} else {
-			width = max(1, width*480/height)
-			height = 480
+			width = max(1, width*maxSide/height)
+			height = maxSide
 		}
 	}
 	target := image.NewNRGBA(image.Rect(0, 0, width, height))
@@ -603,6 +648,12 @@ func (a *App) deleteImages(w http.ResponseWriter, r *http.Request, p principal) 
 				continue
 			}
 		}
+		if row.PreviewKey != "" {
+			if err := store.Delete(r.Context(), row.PreviewKey); err != nil {
+				failed = append(failed, row.ID)
+				continue
+			}
+		}
 		if err := a.removeImageRecord(db, row); err != nil {
 			internal(w, err)
 			return
@@ -656,16 +707,16 @@ func (a *App) serveStoredImage(w http.ResponseWriter, r *http.Request, permitted
 		}
 	}
 	key := row.Key
-	contentType := "image/" + row.Format
-	if row.Format == "jpg" {
-		contentType = "image/jpeg"
-	}
+	contentType := processing.ContentType(row.Format)
 	if file == thumbnailFile(row) && row.ThumbKey != "" {
 		key = row.ThumbKey
 		contentType = "image/png"
 		if path.Ext(key) == ".jpg" || path.Ext(key) == ".jpeg" {
 			contentType = "image/jpeg"
 		}
+	} else if row.PreviewKey != "" && file == previewFile(row) {
+		key = row.PreviewKey
+		contentType = processing.ContentType(strings.TrimPrefix(path.Ext(key), "."))
 	} else if file != id+"."+row.Format {
 		http.NotFound(w, r)
 		return
@@ -677,6 +728,11 @@ func (a *App) serveStoredImage(w http.ResponseWriter, r *http.Request, permitted
 	}
 	etag := fmt.Sprintf("\"%s\"", file)
 	w.Header().Set("Content-Type", contentType)
+	if row.Format == "svg" && key == row.Key {
+		// SVG 不得作为同源活动文档执行；图片上下文仍可嵌入原始矢量。
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'")
+		w.Header().Set("Content-Disposition", "attachment")
+	}
 	w.Header().Set("ETag", etag)
 	// 权限与相册规则检查先于 304；匹配时不再读取本地文件或发起 S3 GetObject。
 	if matchesETag(r.Header.Get("If-None-Match"), etag) {

@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 	"qpix/internal/database"
+	"qpix/internal/processing"
 	"qpix/internal/secret"
 )
 
@@ -340,7 +341,18 @@ func (a *App) publicShare(w http.ResponseWriter, r *http.Request) {
 		view := a.imageView(image)
 		// 分享中的文件必须走分享网关，不能向访客暴露绕过口令的原始链接。
 		view.URL = "/si/" + r.PathValue("token") + "/" + image.ID + "." + image.Format
-		view.ThumbnailURL = "/si/" + r.PathValue("token") + "/" + thumbnailFile(image)
+		if view.ThumbnailURL != "" {
+			view.ThumbnailURL = "/si/" + r.PathValue("token") + "/" + thumbnailFile(image)
+		}
+		if view.PreviewURL != "" {
+			file := image.ID + "." + image.Format
+			if image.PreviewKey != "" {
+				file = previewFile(image)
+			} else if image.ThumbKey != "" && !processing.BrowserImage(image.Format) {
+				file = thumbnailFile(image)
+			}
+			view.PreviewURL = "/si/" + r.PathValue("token") + "/" + file
+		}
 		items = append(items, view)
 	}
 	respond(w, 200, map[string]any{"locked": false, "title": title, "expires_at": row.ExpiresAt, "items": items, "total": total, "page": page, "limit": limit})

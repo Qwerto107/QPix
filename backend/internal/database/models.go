@@ -73,6 +73,7 @@ type Image struct {
 	StorageID         string    `gorm:"index;size:32;not null" json:"storage_id"`
 	Key               string    `gorm:"size:255;not null" json:"-"`
 	ThumbKey          string    `gorm:"size:255" json:"-"`
+	PreviewKey        string    `gorm:"size:255" json:"-"`
 	Format            string    `gorm:"size:10;not null" json:"format"`
 	Size              int64     `gorm:"not null" json:"size"`
 	OriginalSize      int64     `gorm:"not null;default:0" json:"original_size"`

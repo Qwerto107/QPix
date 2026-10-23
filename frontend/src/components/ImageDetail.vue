@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { Copy, ExternalLink, Trash2, Check } from "@lucide/vue";
+import { Copy, ExternalLink, Trash2, Check, Image as ImageIcon } from "@lucide/vue";
 import ImagePreview from "./ImagePreview.vue";
 import Modal from "./Modal.vue";
 import SelectField from "./SelectField.vue";
@@ -72,12 +72,29 @@ async function copyLink(format: LinkFormat) {
     emit("notice", "复制失败，请检查浏览器剪贴板权限", true);
   }
 }
+
+async function copyPreviewLink() {
+  try {
+    await copy(absolute(props.image.preview_url));
+    emit("notice", "预览链接已复制");
+  } catch {
+    emit("notice", "复制失败，请检查浏览器剪贴板权限", true);
+  }
+}
 </script>
 
 <template>
   <Modal title="图片详情" wide :busy="busy" @close="!busy && emit('close')">
     <div class="detail-layout">
-      <ImagePreview :src="image.url" :alt="image.name" />
+      <ImagePreview
+        v-if="image.preview_url"
+        :src="image.preview_url"
+        :alt="image.name"
+      />
+      <div v-else class="image-placeholder preview-unavailable">
+        <ImageIcon :size="40" />
+        <p>暂不支持预览，可下载原文件。</p>
+      </div>
       <div class="detail-fields">
         <span class="tag">{{ image.format.toUpperCase() }}</span>
         <form @submit.prevent="save">
@@ -148,6 +165,13 @@ async function copyLink(format: LinkFormat) {
           <button class="button full" @click="copyLink('url')">
             <Copy :size="16" />复制直链
           </button>
+          <button
+            v-if="image.preview_url && image.preview_url !== image.url"
+            class="button full"
+            @click="copyPreviewLink"
+          >
+            复制预览直链
+          </button>
           <div class="button-pair">
             <button class="button" @click="copyLink('markdown')">
               Markdown</button
@@ -156,9 +180,10 @@ async function copyLink(format: LinkFormat) {
           <a
             class="text-button"
             :href="absolute(image.url)"
+            download
             target="_blank"
             rel="noopener noreferrer"
-            ><ExternalLink :size="15" />打开图片</a
+            ><ExternalLink :size="15" />下载原文件</a
           >
         </div>
         <button

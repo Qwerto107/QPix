@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"qpix/internal/database"
+	"qpix/internal/processing"
 )
 
 type userInput struct {
@@ -301,7 +302,7 @@ func (a *App) uploadOptions(w http.ResponseWriter, r *http.Request, p principal)
 	if p.User.MaxFileBytes > 0 {
 		limit = min(limit, p.User.MaxFileBytes)
 	}
-	options := map[string]any{"max_upload_bytes": limit, "max_pixels": a.maxPixels, "default_storage": a.defaultStorage, "processing": a.processingSettings, "storages": stores, "used_bytes": used, "quota_bytes": p.User.QuotaBytes}
+	options := map[string]any{"max_upload_bytes": limit, "max_pixels": a.maxPixels, "default_storage": a.defaultStorage, "processing": a.processingSettings, "storages": stores, "used_bytes": used, "quota_bytes": p.User.QuotaBytes, "formats": processing.Formats()}
 	a.settingsMu.RUnlock()
 	respond(w, 200, options)
 }

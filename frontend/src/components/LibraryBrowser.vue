@@ -649,10 +649,11 @@ onBeforeUnmount(() => {
                   @click="detail = image"
                 >
                   <img
+                    v-if="image.thumbnail_url"
                     :src="image.thumbnail_url"
                     alt=""
                     loading="lazy"
-                  /><span>{{ image.name }}</span>
+                  /><ImageIcon v-else :size="20" /><span>{{ image.name }}</span>
                 </button>
               </td>
               <td>{{ image.format.toUpperCase() }}</td>
@@ -713,10 +714,13 @@ onBeforeUnmount(() => {
               @click="detail = image"
             >
               <img
+                v-if="image.thumbnail_url"
                 :src="image.thumbnail_url"
                 :alt="image.name"
                 loading="lazy"
-              /></button
+              /><span v-else class="image-placeholder">
+                <ImageIcon :size="32" />暂不支持预览
+              </span></button
             ><label class="image-checkbox"
               ><input
                 type="checkbox"
@@ -888,7 +892,7 @@ onBeforeUnmount(() => {
           永久删除<template v-if="deleteTargets.length === 1"
             >图片“{{ deleteTargets[0]?.name }}”</template
           ><template v-else>选中的 {{ deleteTargets.length }} 张图片</template
-          >及其缩略图？所有直链及分享链接将失效，无法恢复。
+          >及其预览图和缩略图？所有直链及分享链接将失效，无法恢复。
         </p>
         <p v-if="formError" class="form-error">{{ formError }}</p>
         <div class="modal-actions">

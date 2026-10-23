@@ -349,8 +349,25 @@ func migrateListIndexes(db *gorm.DB) error {
 	if err := migrateSQLiteTimes(db); err != nil {
 		return err
 	}
+	if err := migrateImagePreviews(db); err != nil {
+		return err
+	}
 	// 建表和新增索引后补充统计信息，避免新索引缺少优化器估算数据。
 	return optimizeSQLite(db, true)
+}
+
+func migrateImagePreviews(db *gorm.DB) error {
+	var count int64
+	if err := db.Model(&SchemaMigration{}).Where("version = ?", 10).Count(&count).Error; err != nil || count > 0 {
+		return err
+	}
+	// 只加可空列，旧原图和缩略图不重写；兼容 MySQL 非事务 DDL 的重试。
+	if !db.Migrator().HasColumn(&Image{}, "PreviewKey") {
+		if err := db.Migrator().AddColumn(&Image{}, "PreviewKey"); err != nil {
+			return err
+		}
+	}
+	return db.Create(&SchemaMigration{Version: 10, AppliedAt: time.Now().UTC()}).Error
 }
 
 func ensureSearchIndex(db *gorm.DB) error {

@@ -53,7 +53,11 @@ export function uploadImage(
   file: File,
   albumID: string,
   progress: (value: number) => void,
-  options?: { storage_id: string; compression: string; quality: number },
+  options?: {
+    storage_id: string;
+    compression: string;
+    quality: number;
+  },
 ): Promise<ImageItem> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();

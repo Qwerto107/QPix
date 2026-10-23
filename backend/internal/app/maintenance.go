@@ -74,6 +74,12 @@ func (a *App) cleanupImages(ctx context.Context, pending []database.Image) {
 				continue
 			}
 		}
+		if row.PreviewKey != "" {
+			if err := store.Delete(ctx, row.PreviewKey); err != nil {
+				slog.Error("重试删除预览图失败", "image_id", row.ID, "error", err)
+				continue
+			}
+		}
 		if err := a.removeImageRecord(db, row); err != nil {
 			slog.Error("清理已删除图片记录失败", "image_id", row.ID, "error", err)
 		}

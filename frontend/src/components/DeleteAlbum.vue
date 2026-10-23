@@ -83,7 +83,7 @@ async function save() {
         </p></template
       >
       <p v-else class="form-error">
-        图片和缩略图将永久删除，所有直链和分享链接都会失效，无法恢复。
+        图片、预览图和缩略图将永久删除，所有直链和分享链接都会失效，无法恢复。
       </p>
       <p v-if="error" class="form-error">{{ error }}</p>
       <div class="modal-actions">

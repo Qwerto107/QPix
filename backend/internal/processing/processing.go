@@ -7,43 +7,84 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	_ "image/gif"
 	"image/jpeg"
 	"image/png"
 	"io"
 	"sync"
 
 	"github.com/disintegration/imaging"
+	"github.com/gen2brain/avif"
+	"github.com/gen2brain/h265/heic"
+	"github.com/gen2brain/jxl"
 	"github.com/gen2brain/webp"
-	xwebp "golang.org/x/image/webp"
+	"golang.org/x/image/tiff"
 )
 
 const MaxPixels = 4_000_000
 
 var webpEncodeMu sync.Mutex
 
-// Config 显式选择静态 WebP 解码器，避免多个库注册同一格式导致行为受导入顺序影响。
+// Config 显式选择多格式解码器，避免格式注册顺序影响动画和容器识别。
 func Config(data []byte) (image.Config, string, error) {
 	return ConfigReader(bytes.NewReader(data))
 }
 
 func ConfigReader(source io.Reader) (image.Config, string, error) {
 	reader := bufio.NewReader(source)
-	header, _ := reader.Peek(12)
-	if len(header) == 12 && string(header[:4]) == "RIFF" && string(header[8:12]) == "WEBP" {
-		cfg, err := xwebp.DecodeConfig(reader)
-		return cfg, "webp", err
+	header, _ := reader.Peek(512)
+	format := containerFormat(header)
+	switch {
+	case len(header) >= 12 && string(header[:4]) == "RIFF" && string(header[8:12]) == "WEBP":
+		format = "webp"
+	case bytes.HasPrefix(header, []byte{0, 0, 1, 0}):
+		format = "ico"
+	case bytes.HasPrefix(header, []byte{0xff, 0x0a}) || (len(header) >= 12 && string(header[4:8]) == "JXL "):
+		format = "jxl"
+	case bytes.HasPrefix(bytes.TrimSpace(bytes.TrimPrefix(header, []byte{0xef, 0xbb, 0xbf})), []byte("<")):
+		format = "svg"
+	}
+	if format != "" {
+		cfg, err := decodeConfig(reader, format)
+		return cfg, format, err
 	}
 	return image.DecodeConfig(reader)
 }
 
-// Decode 校正 JPEG 的 EXIF 方向；WebP 使用静态解码器，避免静默丢失动画。
+// Decode 仅解码用于预览的画面；Optimize 独立判断动画和多页，防止重编码丢失内容。
 func Decode(data []byte, format string) (image.Image, error) {
 	return DecodeReader(bytes.NewReader(data), format)
 }
 
 func DecodeReader(source io.Reader, format string) (image.Image, error) {
 	if format == "webp" {
-		return xwebp.Decode(source)
+		return webp.Decode(source)
+	}
+	if format == "avif" {
+		return avif.Decode(source, avif.Options{AutoRotate: true})
+	}
+	if format == "heic" {
+		return heic.Decode(source, heic.Options{Threads: 1, AutoRotate: true, FrameSizeLimit: 100_000_000})
+	}
+	if format == "jxl" {
+		data, err := io.ReadAll(source)
+		if err != nil {
+			return nil, err
+		}
+		if jxlAnimated(data) {
+			return nil, errors.New("暂不支持动画 JXL")
+		}
+		return jxl.Decode(bytes.NewReader(data), jxl.Options{Threads: 1, FrameSizeLimit: 100_000_000})
+	}
+	if format == "ico" {
+		frames, err := readIcons(source, true)
+		if err != nil {
+			return nil, err
+		}
+		return frames[0].image, nil
+	}
+	if format == "svg" {
+		return decodeSVG(source)
 	}
 	if format == "jpeg" {
 		return imaging.Decode(source, imaging.AutoOrientation(true))
@@ -83,14 +124,20 @@ func Optimize(data []byte, source image.Image, format, mode string, quality int)
 		result.Status = "failed"
 		return result
 	}
-	if format != "jpeg" && format != "png" && format != "webp" {
+	if !Supported(format) || format == "gif" || format == "svg" {
 		return result
 	}
-	if protectedMetadata(data, format) {
+	// ICO 原格式重编码保留所有尺寸；显式转 WebP 时使用已解码的最大尺寸。
+	if protectedMetadata(data, format) || (Multiple(data, format) && format != "ico") {
 		result.Status = "metadata"
 		return result
 	}
 	if _, cmyk := source.(*image.CMYK); cmyk {
+		result.Status = "metadata"
+		return result
+	}
+	switch source.(type) {
+	case *image.NRGBA64, *image.RGBA64, *image.Gray16:
 		result.Status = "metadata"
 		return result
 	}
@@ -111,11 +158,25 @@ func Optimize(data []byte, source image.Image, format, mode string, quality int)
 	case "png":
 		encoder := png.Encoder{CompressionLevel: png.BestCompression}
 		err = encoder.Encode(&output, quantizePNG(source, quality))
+	case "bmp":
+		err = encodeBMP(&output, source, quality)
+	case "tiff":
+		err = tiff.Encode(&output, quantizeRaster(source, quality), &tiff.Options{Compression: tiff.Deflate})
+	case "ico":
+		err = encodeIcons(&output, data, quality)
+	case "avif":
+		err = avif.Encode(&output, source, avif.Options{Quality: quality, QualityAlpha: 100, Speed: 8})
+	case "heic":
+		err = heic.Encode(&output, source, heic.EncodeOptions{Quality: quality})
+	case "jxl":
+		err = jxl.Encode(&output, source, jxl.EncodeOptions{Quality: quality, Effort: 3, Threads: 1})
 	case "webp":
 		// WebP 的纯 Go 模块有额外堆内存，单独串行；JPEG、PNG 可在上传处理槽位内并行。
 		webpEncodeMu.Lock()
 		defer webpEncodeMu.Unlock()
 		err = webp.Encode(&output, source, webp.Options{Quality: quality, Method: 4, Exact: true})
+	default:
+		return result
 	}
 	if err != nil {
 		result.Status = "failed"
@@ -200,6 +261,9 @@ func quantizePNG(source image.Image, quality int) image.Image {
 }
 
 func protectedMetadata(data []byte, format string) bool {
+	if format != "jpeg" && format != "png" && format != "webp" {
+		return false
+	}
 	if format == "webp" {
 		// VP8X 的动画、ICC、EXIF、XMP 标志：不能静默丢弃动画或色彩信息。
 		return len(data) >= 21 && string(data[12:16]) == "VP8X" && data[20]&0x2e != 0

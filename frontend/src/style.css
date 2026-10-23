@@ -3464,6 +3464,26 @@ textarea {
   margin: 0;
   font-size: 12px;
 }
+.image-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+}
+.image-open > .image-placeholder,
+.public-image-open > .image-placeholder {
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  font-size: 12px;
+}
+.preview-unavailable {
+  min-height: 240px;
+  flex-direction: column;
+  background: var(--mint);
+  border-radius: 12px;
+}
 @media (max-width: 600px) {
   .token-editor .form-two-columns {
     grid-template-columns: 1fr;

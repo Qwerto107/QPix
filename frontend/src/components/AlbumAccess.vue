@@ -82,7 +82,7 @@ async function save() {
         ></template
       >
       <p class="field-help">
-        仅对原图和缩略图直链生效，全局图片 IP
+        仅对原图、预览图和缩略图直链生效，全局图片 IP
         白名单始终有效。分享通过密码、有效期和撤销状态控制。
       </p>
       <p v-if="error" class="form-error" role="alert">{{ error }}</p>

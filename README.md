@@ -88,10 +88,10 @@ Windows、外部数据库、HTTPS 和升级步骤见 [部署指南](docs/deploym
 
 ## 支持范围
 
-- 支持 JPEG、PNG、GIF、静态 WebP，不接受 SVG 或动画 WebP；GIF 保留原动画。
+- 支持 JPEG、PNG／APNG、GIF、WebP（含动画）、BMP、TIFF、ICO、AVIF、HEIC／HEIF、静态 JXL 和 SVG。格式压缩与预览范围见 [使用指南](docs/usage.md#压缩细节)。
 - 默认单张 20 MiB、2500 万像素，可在后台调整。压缩最多处理 400 万像素，只采用更小的结果，详见 [压缩细节](docs/usage.md#压缩细节)。
 - 个人资源按账号隔离。系统管理权限仅用于登录会话，个人 Token 不继承全站权限。
-- 原图、缩略图和分享通过 QPix 网关访问；S3 Bucket 保持私有，图片访问不使用共享 CDN 缓存。
+- 原图、预览图、缩略图和分享通过 QPix 网关访问；S3 Bucket 保持私有，图片访问不使用共享 CDN 缓存。
 - 当前按单应用实例运行，SQLite 使用本机磁盘；不包含旧图床数据自动迁移、回收站或存储自动迁移。
 
 ## 文档导航

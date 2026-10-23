@@ -9,6 +9,7 @@ import {
   Copy,
   LoaderCircle,
   Folder,
+  Image as ImageIcon,
 } from "@lucide/vue";
 import { uploadImage } from "../api";
 import SelectField from "./SelectField.vue";
@@ -24,6 +25,7 @@ const props = defineProps<{
   defaultStorage: string;
   defaultCompression: string;
   defaultQuality: number;
+  formats: string[];
 }>();
 const emit = defineEmits<{
   uploaded: [];
@@ -54,6 +56,9 @@ watch(
 const storage = ref("");
 const compression = ref("default");
 const quality = ref(props.defaultQuality);
+const acceptedFiles = computed(() =>
+  props.formats.map((format) => `.${format}`).join(","),
+);
 let qualityEdited = false;
 watch(
   () => props.defaultQuality,
@@ -111,7 +116,7 @@ function addFiles(files: File[] | FileList) {
     if (
       queue.value.length >= 100 ||
       file.size > props.maxBytes ||
-      !/\.(jpe?g|png|gif|webp)$/i.test(file.name)
+      !props.formats.includes(file.name.split(".").pop()?.toLowerCase() || "")
     ) {
       rejected++;
       continue;
@@ -119,7 +124,9 @@ function addFiles(files: File[] | FileList) {
     queue.value.push({
       id: nextID++,
       file,
-      preview: URL.createObjectURL(file),
+      preview: /\.(jpe?g|png|apng|gif|webp|avif|ico|svg)$/i.test(file.name)
+        ? URL.createObjectURL(file)
+        : "",
       album: album.value,
       storage: storage.value || props.defaultStorage,
       compression:
@@ -161,6 +168,8 @@ function run() {
     )
       .then((image) => {
         item.image = image;
+        if (item.preview.startsWith("blob:")) URL.revokeObjectURL(item.preview);
+        item.preview = image.thumbnail_url || image.preview_url || "";
         item.state = "done";
         emit("uploaded");
       })
@@ -179,6 +188,11 @@ function retry(item: UploadItem) {
   item.progress = 0;
   item.error = "";
   run();
+}
+
+function previewFailed(item: UploadItem) {
+  if (item.preview.startsWith("blob:")) URL.revokeObjectURL(item.preview);
+  item.preview = "";
 }
 function remove(item: UploadItem) {
   if (item.state === "uploading") return;
@@ -236,12 +250,13 @@ defineExpose({ addFiles });
           <ImagePlus :size="17" />选择图片
         </button>
         <span class="dropzone-hint"
-          >JPG、PNG、GIF、静态 WebP · 单张不超过 {{ bytes(maxBytes) }}</span
+          :title="formats.map((value) => value.toUpperCase()).join('、')"
+          >JPEG、PNG、WebP、AVIF、HEIC、JXL 等格式 · 单张不超过 {{ bytes(maxBytes) }}</span
         >
         <input
           ref="input"
           type="file"
-          accept="image/jpeg,image/png,image/gif,image/webp"
+          :accept="acceptedFiles"
           multiple
           hidden
           @change="selectFiles"
@@ -256,9 +271,18 @@ defineExpose({ addFiles });
           <button class="text-button" @click="clear">清除已结束</button>
         </div>
         <div v-for="item in queue" :key="item.id" class="queue-row">
-          <img :src="item.preview" alt="" class="queue-preview" />
+          <img
+            v-if="item.preview"
+            :src="item.preview"
+            alt=""
+            class="queue-preview"
+            @error="previewFailed(item)"
+          />
+          <span v-else class="queue-preview image-placeholder">
+            <ImageIcon :size="22" />
+          </span>
           <div class="queue-details">
-            <strong>{{ item.file.name }}</strong
+            <strong>{{ item.image?.name || item.file.name }}</strong
             ><span v-if="item.state === 'error'" class="error-text">{{
               item.error
             }}</span
@@ -387,7 +411,8 @@ defineExpose({ addFiles });
         <h3>按你的方式保存。</h3>
         <p>
           可选择原格式压缩或转换为
-          WebP，保留透明度和图片尺寸。仅采用更小的结果，成功后不另存原文件。
+          WebP，保留透明度。动画、SVG 和多页 TIFF 保留原文件；多尺寸 ICO
+          原格式压缩保留所有尺寸，转 WebP 取最大尺寸。仅采用更小的结果，成功后不另存原文件。
         </p>
         <div class="note-divider" />
         <p>私有图片需要登录授权；对外访问请设置相册访客权限或创建分享链接。</p>

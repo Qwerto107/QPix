@@ -17,7 +17,7 @@ const labels = { admin: "管理端", upload: "上传接口", images: "图片直�
 const descriptions = {
   admin: "管理员登录与管理操作，页面静态资源不受限。",
   upload: "所有图片上传请求，校验 IP 和登录／Token 身份，不校验 Referer。",
-  images: "仅原图和缩略图直链，不影响分享、普通用户登录和操作。",
+  images: "仅原图、预览图和缩略图直链，不影响分享、普通用户登录和操作。",
 };
 async function load() {
   loading.value = true;

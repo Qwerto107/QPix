@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { LockKeyhole } from "@lucide/vue";
+import { LockKeyhole, Image as ImageIcon } from "@lucide/vue";
 import Modal from "./Modal.vue";
 import { api } from "../api";
 import type { ImageItem } from "../types";
@@ -86,7 +86,7 @@ onMounted(load);
             {{ locked ? "受密码保护的分享" : title }}
           </h1>
           <p>
-            此链接仅授予指定图片或相册的浏览权限。<span v-if="expires">
+            此链接仅授予指定图片的访问权限。<span v-if="expires">
               · {{ new Date(expires).toLocaleString() }} 到期</span
             >
           </p>
@@ -125,10 +125,14 @@ onMounted(load);
               @click="detail = image"
             >
               <img
+                v-if="image.thumbnail_url"
                 :src="image.thumbnail_url"
                 :alt="image.name"
                 loading="lazy"
               />
+              <span v-else class="image-placeholder">
+                <ImageIcon :size="32" />暂不支持预览
+              </span>
             </button>
             <div class="image-card-caption">
               <strong>{{ image.name }}</strong>
@@ -164,12 +168,18 @@ onMounted(load);
     </main>
     <Modal v-if="detail" :title="detail.name" wide @close="detail = null"
       ><div class="public-image-detail">
-        <img :src="detail.url" :alt="detail.name" /><a
+        <img v-if="detail.preview_url" :src="detail.preview_url" :alt="detail.name" />
+        <div v-else class="image-placeholder preview-unavailable">
+          <ImageIcon :size="40" />
+          <p>暂不支持预览，可下载原文件。</p>
+        </div>
+        <a
           class="button"
           :href="detail.url"
+          download
           target="_blank"
           rel="noopener noreferrer"
-          >打开图片</a
+          >下载原文件</a
         >
       </div></Modal
     >

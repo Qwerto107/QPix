@@ -1,6 +1,6 @@
 module qpix
 
-go 1.26.0
+go 1.26.4
 
 toolchain go1.26.10
 
@@ -9,7 +9,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
 	github.com/disintegration/imaging v1.6.2
+	github.com/gen2brain/avif v0.6.0
+	github.com/gen2brain/h265 v0.2.3
+	github.com/gen2brain/jxl v0.2.0
 	github.com/gen2brain/webp v0.6.4
+	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c
+	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
+	github.com/thatoddmailbox/go-ico v0.1.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/image v0.47.0
 	gorm.io/driver/mysql v1.6.0
@@ -44,6 +50,8 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.22 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/tetratelabs/wazero v1.12.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
