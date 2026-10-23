@@ -24,6 +24,7 @@ import Modal from "./components/Modal.vue";
 import UploadPanel from "./components/UploadPanel.vue";
 import LibraryBrowser from "./components/LibraryBrowser.vue";
 import ResourceList from "./components/ResourceList.vue";
+import ShareEditor from "./components/ShareEditor.vue";
 import StorageSettings from "./components/StorageSettings.vue";
 import ProcessingSettings from "./components/ProcessingSettings.vue";
 import AccessSettings from "./components/AccessSettings.vue";
@@ -166,8 +167,12 @@ function uploadTo(id: string) {
   go("upload");
   uploadAlbum.value = id || albums.value.find((v) => v.is_default)?.id || "";
 }
-function share(image: ImageItem) {
-  go(view.value === "manageImages" ? "manageShares" : "shares");
+async function share(image: ImageItem) {
+  const userID = user.value?.id,
+    originView = view.value;
+  // 等待图片详情卸载后再打开，避免新弹窗继承旧弹窗的滚动锁。
+  await nextTick();
+  if (!userID || user.value?.id !== userID || view.value !== originView) return;
   shareTarget.value = { id: image.id, name: image.name };
 }
 async function initialize() {
@@ -699,7 +704,6 @@ onBeforeUnmount(() => {
           :all="view === 'manageTokens' || view === 'manageShares'"
           :accounts="accountRows"
           :can-create-token="view === 'tokens'"
-          :target="shareTarget"
           @notice="notice"
         />
         <StorageSettings
@@ -969,6 +973,13 @@ onBeforeUnmount(() => {
       </div>
     </form></Modal
   >
+  <ShareEditor
+    v-if="user && shareTarget"
+    :key="shareTarget.id"
+    :target="shareTarget"
+    @close="shareTarget = null"
+    @notice="notice"
+  />
   <div class="toast-stack" aria-live="polite">
     <div
       v-for="item in notifications"

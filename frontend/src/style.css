@@ -1883,12 +1883,6 @@ input.quality-slider:disabled {
   font-size: 11px;
   color: #76856e;
 }
-.share-search {
-  margin-top: 20px;
-}
-.share-search .button {
-  margin-top: 10px;
-}
 .mine-filter {
   margin: 0;
   white-space: nowrap;

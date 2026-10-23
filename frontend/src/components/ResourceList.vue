@@ -5,16 +5,8 @@ import Modal from "./Modal.vue";
 import TokenEditor from "./TokenEditor.vue";
 import { tokenSummary } from "../tokenPermissions";
 import SelectField from "./SelectField.vue";
-import ExpirationField from "./ExpirationField.vue";
-import { resolveExpiration } from "../expiration";
 import { api } from "../api";
-import type {
-  APIToken,
-  ShareItem,
-  RecordPage,
-  User,
-  ImagePage,
-} from "../types";
+import type { APIToken, ShareItem, RecordPage, User } from "../types";
 import {
   absolute,
   copy,
@@ -29,7 +21,6 @@ const props = defineProps<{
   all?: boolean;
   canCreateToken?: boolean;
   accounts: User[];
-  target?: { id: string; name: string } | null;
 }>();
 const emit = defineEmits<{ notice: [text: string, error?: boolean] }>();
 type Row = APIToken & ShareItem;
@@ -43,31 +34,22 @@ const rows = ref<Row[]>([]),
   total = ref(0),
   loading = ref(false),
   error = ref("");
-const cursors = ref([""]), nextCursor = ref("");
+const cursors = ref([""]),
+  nextCursor = ref("");
 const tokenEditor = ref(false),
   editingToken = ref<APIToken | null>(null);
 function editToken(token?: APIToken) {
   editingToken.value = token || null;
   tokenEditor.value = true;
 }
-const open = ref(false),
-  busy = ref(false),
+const busy = ref(false),
   formError = ref(""),
-  period = ref("permanent"),
-  expires = ref(""),
-  password = ref(""),
-  targetID = ref(""),
-  selectedTarget = ref<{ id: string; name: string } | null>(null),
   revoking = ref<Row | null>(null),
   deleting = ref<Row | null>(null);
-const imageSearch = ref(""),
-  choices = ref<{ value: string; label: string }[]>([]),
-  imageLoading = ref(false);
 const now = ref(Date.now());
 const clock = setInterval(() => (now.value = Date.now()), 30000);
 let requestID = 0,
-  timer: ReturnType<typeof setTimeout> | undefined,
-  imageRequest = 0;
+  timer: ReturnType<typeof setTimeout> | undefined;
 async function load() {
   page.value = 1;
   cursors.value = [""];
@@ -130,68 +112,6 @@ watch(
   },
   { immediate: true },
 );
-async function findImages() {
-  const request = ++imageRequest;
-  imageLoading.value = true;
-  formError.value = "";
-  try {
-    const data = await api<ImagePage>(
-      `/images?scope=${props.all ? "all" : "own"}&limit=100&q=${encodeURIComponent(imageSearch.value)}`,
-    );
-    if (request !== imageRequest) return;
-    choices.value = data.items.map((v) => ({ value: v.id, label: v.name }));
-  } catch (e) {
-    if (request === imageRequest) formError.value = message(e);
-  } finally {
-    if (request === imageRequest) imageLoading.value = false;
-  }
-}
-function create(target?: { id: string; name: string }) {
-  if (props.kind === "tokens") {
-    editToken();
-    return;
-  }
-  expires.value = "";
-  period.value = "permanent";
-  password.value = "";
-  // 从图片进入时固定本次分享目标，列表主动创建时重新选择，避免沿用上次图片。
-  selectedTarget.value = target ? { ...target } : null;
-  targetID.value = target?.id || "";
-  imageRequest++;
-  imageLoading.value = false;
-  formError.value = "";
-  imageSearch.value = "";
-  open.value = true;
-  if (!selectedTarget.value) void findImages();
-}
-watch(
-  () => props.target,
-  (value) => {
-    if (value) create(value);
-  },
-  { immediate: true },
-);
-async function save() {
-  if (busy.value) return;
-  busy.value = true;
-  formError.value = "";
-  try {
-    await api("/shares", "POST", {
-      kind: "image",
-      target_id: selectedTarget.value?.id || targetID.value,
-      password: password.value,
-      expires_at: resolveExpiration(period.value, expires.value),
-    });
-    password.value = "";
-    open.value = false;
-    await load();
-    emit("notice", "图片分享链接已创建");
-  } catch (e) {
-    formError.value = message(e);
-  } finally {
-    busy.value = false;
-  }
-}
 async function revoke() {
   if (!revoking.value) return;
   busy.value = true;
@@ -240,15 +160,8 @@ function rowStatus(row: Row) {
       ? "已到期"
       : "有效";
 }
-function close() {
-  if (busy.value) return;
-  open.value = false;
-  password.value = "";
-  imageRequest++;
-}
 onBeforeUnmount(() => {
   requestID++;
-  imageRequest++;
   if (timer) clearTimeout(timer);
   clearInterval(clock);
 });
@@ -299,13 +212,11 @@ onBeforeUnmount(() => {
           { value: 'asc', label: '创建时间 ↑' },
         ]"
       /><button
-        v-if="kind === 'shares' || canCreateToken"
+        v-if="kind === 'tokens' && canCreateToken"
         class="button primary compact"
-        @click="create()"
+        @click="editToken()"
       >
-        <Plus :size="15" />{{
-          kind === "tokens" ? "创建 Token" : "创建图片分享"
-        }}
+        <Plus :size="15" />创建 Token
       </button>
     </div>
     <p class="field-help" v-if="kind === 'tokens'">
@@ -316,7 +227,7 @@ onBeforeUnmount(() => {
       }}所有 Token 均无系统管理权限。
     </p>
     <p v-else class="field-help">
-      仅分享选中的单张图片，可设置密码、到期时间并随时撤销。
+      管理已有图片分享，可复制链接、撤销或删除已撤销记录。创建分享请在图库中点击图片的“分享”。
     </p>
     <p v-if="error" class="form-error" role="alert">
       {{ error }} <button class="text-button" @click="load">重试</button>
@@ -478,63 +389,6 @@ onBeforeUnmount(() => {
       @saved="load"
       @notice="(text, bad) => emit('notice', text, bad)"
     />
-    <Modal v-if="open" title="创建图片分享" :busy="busy" @close="close"
-      ><form class="modal-body share-editor" @submit.prevent="save">
-        <div v-if="selectedTarget" class="share-target">
-          <span class="field-label">分享图片</span>
-          <p class="share-target-name">{{ selectedTarget.name }}</p>
-        </div>
-        <template v-else>
-          <label class="field-label" for="resource-image-search"
-            >搜索图片</label
-          >
-          <div class="inline-search">
-            <input
-              id="resource-image-search"
-              v-model="imageSearch"
-              @keydown.enter.prevent="findImages"
-            /><button
-              type="button"
-              class="button"
-              :disabled="imageLoading"
-              @click="findImages"
-            >
-              {{ imageLoading ? "搜索中…" : "搜索" }}
-            </button>
-          </div>
-          <label class="field-label">选择图片</label
-          ><SelectField
-            id="resource-image"
-            label="选择图片"
-            v-model="targetID"
-            :options="choices"
-          />
-        </template>
-        <label class="field-label" for="resource-password"
-          >访问密码（可选）</label
-        ><input
-          id="resource-password"
-          v-model="password"
-          type="password"
-          autocomplete="new-password"
-          maxlength="72"
-        />
-        <ExpirationField
-          id="share-editor"
-          v-model="period"
-          v-model:custom="expires"
-          :disabled="busy"
-        />
-        <p v-if="formError" class="form-error" role="alert">{{ formError }}</p>
-        <div class="modal-actions">
-          <button type="button" class="button" :disabled="busy" @click="close">
-            取消</button
-          ><button class="button primary" :disabled="busy || !targetID">
-            {{ busy ? "正在创建…" : "创建" }}
-          </button>
-        </div>
-      </form></Modal
-    >
     <Modal
       v-if="deleting"
       :title="kind === 'tokens' ? '删除 Token 记录' : '删除分享记录'"
@@ -583,33 +437,3 @@ onBeforeUnmount(() => {
     >
   </section>
 </template>
-
-<style scoped>
-.share-editor {
-  padding: 18px 22px;
-}
-.share-editor .field-label,
-.share-editor :deep(.expiration-field .field-label) {
-  margin: 14px 0 7px;
-}
-.share-target .field-label,
-.share-editor > .field-label:first-child {
-  margin-top: 0;
-}
-.share-editor :deep(.expiration-field:not(.is-custom) .form-two-columns) {
-  grid-template-columns: 1fr;
-}
-.share-editor :deep(.expiration-field .select-field) {
-  max-width: none;
-}
-.share-editor .modal-actions {
-  margin-top: 18px;
-}
-.share-target-name {
-  margin: 6px 0 0;
-  overflow-wrap: anywhere;
-  font-size: 12px;
-  font-weight: 550;
-  color: var(--ink);
-}
-</style>
