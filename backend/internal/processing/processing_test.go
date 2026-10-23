@@ -6,6 +6,7 @@ import (
 	"hash/crc32"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/jpeg"
 	"image/png"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	"github.com/gen2brain/webp"
 	xwebp "golang.org/x/image/webp"
 )
+
+type genericImage struct{ image.Image }
 
 func fixture(width, height int, transparent bool) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
@@ -31,6 +34,21 @@ func fixture(width, height int, transparent bool) *image.NRGBA {
 func TestAlphaAndFallback(t *testing.T) {
 	source := fixture(128, 96, true)
 	source.SetNRGBA(0, 0, color.NRGBA{R: 200, G: 100, B: 80, A: 0})
+	rgba := image.NewRGBA(source.Bounds())
+	draw.Draw(rgba, rgba.Bounds(), source, source.Bounds().Min, draw.Src)
+	for _, input := range []image.Image{source.SubImage(image.Rect(3, 2, 119, 91)), rgba.SubImage(image.Rect(3, 2, 119, 91))} {
+		for _, quality := range []int{20, 100} {
+			fast, generic := quantizePNG(input, quality), quantizePNG(genericImage{input}, quality)
+			bounds := input.Bounds()
+			for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+				for x := bounds.Min.X; x < bounds.Max.X; x++ {
+					if color.NRGBAModel.Convert(fast.At(x, y)) != color.NRGBAModel.Convert(generic.At(x, y)) {
+						t.Fatalf("像素快速路径改变了透明度或颜色：%T (%d,%d)", input, x, y)
+					}
+				}
+			}
+		}
+	}
 	var buffer bytes.Buffer
 	if err := png.Encode(&buffer, source); err != nil {
 		t.Fatal(err)

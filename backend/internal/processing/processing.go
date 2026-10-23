@@ -1,6 +1,7 @@
 package processing
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -18,23 +19,37 @@ import (
 
 const MaxPixels = 4_000_000
 
-var encodeMu sync.Mutex
+var webpEncodeMu sync.Mutex
 
 // Config 显式选择静态 WebP 解码器，避免多个库注册同一格式导致行为受导入顺序影响。
 func Config(data []byte) (image.Config, string, error) {
-	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
-		cfg, err := xwebp.DecodeConfig(bytes.NewReader(data))
+	return ConfigReader(bytes.NewReader(data))
+}
+
+func ConfigReader(source io.Reader) (image.Config, string, error) {
+	reader := bufio.NewReader(source)
+	header, _ := reader.Peek(12)
+	if len(header) == 12 && string(header[:4]) == "RIFF" && string(header[8:12]) == "WEBP" {
+		cfg, err := xwebp.DecodeConfig(reader)
 		return cfg, "webp", err
 	}
-	return image.DecodeConfig(bytes.NewReader(data))
+	return image.DecodeConfig(reader)
 }
 
 // Decode 校正 JPEG 的 EXIF 方向；WebP 使用静态解码器，避免静默丢失动画。
 func Decode(data []byte, format string) (image.Image, error) {
+	return DecodeReader(bytes.NewReader(data), format)
+}
+
+func DecodeReader(source io.Reader, format string) (image.Image, error) {
 	if format == "webp" {
-		return xwebp.Decode(bytes.NewReader(data))
+		return xwebp.Decode(source)
 	}
-	return imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+	if format == "jpeg" {
+		return imaging.Decode(source, imaging.AutoOrientation(true))
+	}
+	decoded, _, err := image.Decode(source)
+	return decoded, err
 }
 
 type Result struct {
@@ -79,13 +94,11 @@ func Optimize(data []byte, source image.Image, format, mode string, quality int)
 		result.Status = "metadata"
 		return result
 	}
-	// 纯 Go 编码有额外内存开销：大图保留原文件，编码串行执行以限制峰值。
+	// 纯 Go 编码有额外内存开销，大图保留原文件。
 	if int64(source.Bounds().Dx())*int64(source.Bounds().Dy()) > MaxPixels {
 		result.Status = "pixel_limit"
 		return result
 	}
-	encodeMu.Lock()
-	defer encodeMu.Unlock()
 	output := limitedBuffer{limit: len(data)}
 	target := format
 	if mode == "webp" {
@@ -99,6 +112,9 @@ func Optimize(data []byte, source image.Image, format, mode string, quality int)
 		encoder := png.Encoder{CompressionLevel: png.BestCompression}
 		err = encoder.Encode(&output, quantizePNG(source, quality))
 	case "webp":
+		// WebP 的纯 Go 模块有额外堆内存，单独串行；JPEG、PNG 可在上传处理槽位内并行。
+		webpEncodeMu.Lock()
+		defer webpEncodeMu.Unlock()
 		err = webp.Encode(&output, source, webp.Options{Quality: quality, Method: 4, Exact: true})
 	}
 	if err != nil {
@@ -128,11 +144,38 @@ func quantizePNG(source image.Image, quality int) image.Image {
 	palette := color.Palette{}
 	indices := make(map[color.NRGBA]uint8)
 	indexed := image.NewPaletted(bounds, nil)
+	// 常见的 8 位 PNG 直接读取像素，兼容子图的非零原点与步长；其他色彩模型保留通用路径。
+	nrgba, _ := source.(*image.NRGBA)
+	rgba, _ := source.(*image.RGBA)
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		out := output.Pix[(y-bounds.Min.Y)*output.Stride:]
+		paletteRow := indexed.Pix[(y-bounds.Min.Y)*indexed.Stride:]
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			pixel := color.NRGBAModel.Convert(source.At(x, y)).(color.NRGBA)
+			var pixel color.NRGBA
+			switch {
+			case nrgba != nil:
+				i := (y-bounds.Min.Y)*nrgba.Stride + (x-bounds.Min.X)*4
+				p := nrgba.Pix[i : i+4]
+				pixel = color.NRGBA{R: p[0], G: p[1], B: p[2], A: p[3]}
+			case rgba != nil:
+				i := (y-bounds.Min.Y)*rgba.Stride + (x-bounds.Min.X)*4
+				p := rgba.Pix[i : i+4]
+				pixel.A = p[3]
+				if p[3] == 255 {
+					pixel.R, pixel.G, pixel.B = p[0], p[1], p[2]
+				} else if p[3] != 0 {
+					// RGBA 通道预乘了 alpha，按标准库规则还原为 NRGBA，不能把透明像素压到背景色。
+					a := uint32(p[3])
+					pixel.R = uint8((uint32(p[0]) * 0xffff / a) >> 8)
+					pixel.G = uint8((uint32(p[1]) * 0xffff / a) >> 8)
+					pixel.B = uint8((uint32(p[2]) * 0xffff / a) >> 8)
+				}
+			default:
+				pixel = color.NRGBAModel.Convert(source.At(x, y)).(color.NRGBA)
+			}
 			pixel.R, pixel.G, pixel.B = lookup[pixel.R], lookup[pixel.G], lookup[pixel.B]
-			output.SetNRGBA(x, y, pixel)
+			i := (x - bounds.Min.X) * 4
+			out[i], out[i+1], out[i+2], out[i+3] = pixel.R, pixel.G, pixel.B, pixel.A
 			if indices == nil {
 				continue
 			}
@@ -146,7 +189,7 @@ func quantizePNG(source image.Image, quality int) image.Image {
 				indices[pixel] = index
 				palette = append(palette, pixel)
 			}
-			indexed.SetColorIndex(x, y, index)
+			paletteRow[x-bounds.Min.X] = index
 		}
 	}
 	if indices != nil {
