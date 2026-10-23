@@ -33,6 +33,8 @@ type App struct {
 	loginLimits, uploadLimits   limiter
 	passwordLimits, shareLimits limiter
 	shareCreateLimits           limiter
+	rateMu                      sync.RWMutex
+	rateLimits                  map[string]rateLimitRule
 	uploadMu                    sync.Mutex
 	uploads                     map[string]int
 	uploadCount                 int
@@ -166,6 +168,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/storages/{id}/test", a.admin(a.testProfile, false))
 	mux.HandleFunc("GET /api/v1/processing", a.admin(a.getProcessing, false))
 	mux.HandleFunc("PUT /api/v1/processing", a.admin(a.updateProcessing, false))
+	mux.HandleFunc("GET /api/v1/rate-limits", a.admin(a.getRateLimits, false))
+	mux.HandleFunc("PUT /api/v1/rate-limits", a.admin(a.updateRateLimits, false))
 	mux.HandleFunc("GET /api/v1/access", a.admin(a.listAccess, false))
 	mux.HandleFunc("PUT /api/v1/access/{scope}", a.admin(a.updateAccess, false))
 	mux.HandleFunc("GET /i/{file}", a.serveImage)
@@ -396,7 +400,8 @@ type limiter struct {
 	nextCleanup time.Time
 }
 
-func (l *limiter) allow(key string, limit int, duration time.Duration) bool {
+// retry 返回需要等待的时长；零表示本次请求已获准。
+func (l *limiter) retry(key string, limit int, duration time.Duration) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.entries == nil {
@@ -414,15 +419,15 @@ func (l *limiter) allow(key string, limit int, duration time.Duration) bool {
 	entry, exists := l.entries[key]
 	// 达到容量时只拒绝新来源，不能使已有来源全部失效，也不能淘汰仍在限流的记录。
 	if !exists && len(l.entries) >= 10000 {
-		return false
+		return l.nextCleanup.Sub(now)
 	}
 	if !entry.until.After(now) {
 		entry = window{until: now.Add(duration)}
 	}
 	if entry.count >= limit {
-		return false
+		return entry.until.Sub(now)
 	}
 	entry.count++
 	l.entries[key] = entry
-	return true
+	return 0
 }

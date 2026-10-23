@@ -171,6 +171,8 @@ func TestLifecycle(t *testing.T) {
 			}
 			c.request("POST", "/api/v1/albums", map[string]string{"name": "缺少 CSRF"}, 403)
 			c.csrf = auth.CSRF
+			c.request("GET", "/api/v1/rate-limits", nil, 200)
+			c.request("PUT", "/api/v1/rate-limits", map[string]any{"rules": defaultRateLimits()}, 200)
 			cross, _ := http.NewRequest("POST", server.URL+"/api/v1/albums", strings.NewReader(`{"name":"非法来源"}`))
 			cross.Header.Set("Origin", "https://untrusted.example")
 			cross.Header.Set("X-CSRF-Token", c.csrf)

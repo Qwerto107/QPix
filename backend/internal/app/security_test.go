@@ -25,21 +25,21 @@ import (
 
 func TestLimiterCapacityAndIsolation(t *testing.T) {
 	a := &App{}
-	a.loginLimits.allow("known", 2, time.Minute)
+	a.loginLimits.retry("known", 2, time.Minute)
 	for i := 0; i < 10000; i++ {
-		a.loginLimits.allow(fmt.Sprint(i), 2, time.Minute)
-		a.shareLimits.allow(fmt.Sprint(i), 2, time.Minute)
+		a.loginLimits.retry(fmt.Sprint(i), 2, time.Minute)
+		a.shareLimits.retry(fmt.Sprint(i), 2, time.Minute)
 	}
-	if !a.loginLimits.allow("known", 2, time.Minute) || a.loginLimits.allow("known", 2, time.Minute) {
+	if a.loginLimits.retry("known", 2, time.Minute) != 0 || a.loginLimits.retry("known", 2, time.Minute) <= 0 {
 		t.Fatal("容量满时应保留已有来源的剩余次数与限制")
 	}
-	if !a.passwordLimits.allow("user", 1, time.Minute) || a.passwordLimits.allow("user", 1, time.Minute) {
+	if a.passwordLimits.retry("user", 1, time.Minute) != 0 || a.passwordLimits.retry("user", 1, time.Minute) <= 0 {
 		t.Fatal("分享和登录限流不应占用改密限流容量")
 	}
 	// 过期记录应回收，不因历史来源永久占满容量。
 	a.loginLimits.entries["known"] = window{until: time.Now().Add(-time.Second)}
 	a.loginLimits.nextCleanup = time.Time{}
-	if !a.loginLimits.allow("new", 1, time.Minute) {
+	if a.loginLimits.retry("new", 1, time.Minute) != 0 {
 		t.Fatal("未回收过期限流记录")
 	}
 	r := httptest.NewRequest("POST", "/", nil)

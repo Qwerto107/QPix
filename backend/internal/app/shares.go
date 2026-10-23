@@ -126,9 +126,7 @@ func (a *App) createShare(w http.ResponseWriter, r *http.Request, p principal) {
 	if !decode(w, r, &input) {
 		return
 	}
-	if !a.shareCreateLimits.allow(p.User.ID, 30, time.Minute) {
-		w.Header().Set("Retry-After", "60")
-		fail(w, 429, "创建分享过于频繁，请稍后重试")
+	if !a.allowRate(w, "share_create", p.User.ID, "创建分享过于频繁，请稍后重试") {
 		return
 	}
 	if input.Kind != "image" || input.TargetID == "" {
@@ -359,9 +357,7 @@ func (a *App) publicShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) unlockShare(w http.ResponseWriter, r *http.Request) {
-	if !a.shareLimits.allow(a.limiterIP(r), 15, 15*time.Minute) {
-		w.Header().Set("Retry-After", "900")
-		fail(w, 429, "尝试过于频繁，请稍后重试")
+	if !a.allowRate(w, "share_unlock", a.limiterIP(r), "尝试过于频繁，请稍后重试") {
 		return
 	}
 	var input struct {

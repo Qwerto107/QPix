@@ -60,6 +60,9 @@ func testPermissionsAndShares(t *testing.T, a *App, admin *testClient, fixture [
 
 	alice.request("GET", "/api/v1/users", nil, 403)
 	alice.request("GET", "/api/v1/storages", nil, 403)
+	alice.request("GET", "/api/v1/rate-limits", nil, 403)
+	alice.request("PUT", "/api/v1/rate-limits", map[string]any{"rules": defaultRateLimits()}, 403)
+	guest.request("GET", "/api/v1/rate-limits", nil, 401)
 	for _, path := range []string{"images", "albums", "shares", "tokens", "stats"} {
 		alice.request("GET", "/api/v1/"+path+"?scope=all", nil, 403)
 	}

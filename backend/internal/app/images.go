@@ -137,9 +137,7 @@ func (a *App) listImages(w http.ResponseWriter, r *http.Request, p principal) {
 }
 
 func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
-	if !a.uploadLimits.allow(p.User.ID, 120, time.Minute) {
-		w.Header().Set("Retry-After", "60")
-		fail(w, 429, "上传过于频繁，请稍后再试")
+	if !a.allowRate(w, "upload", p.User.ID, "上传过于频繁，请稍后再试") {
 		return
 	}
 	release, ok := a.beginUpload(p.User.ID)

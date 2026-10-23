@@ -14,9 +14,7 @@ import (
 const dummyPasswordHash = "$2a$10$XajjQvNhvvRt5GSeFk1xFeyqRrsxkhBkUiQeg0dt.wU1qD4aFDcga"
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
-	if !a.loginLimits.allow(a.limiterIP(r), 15, 15*time.Minute) {
-		w.Header().Set("Retry-After", "900")
-		fail(w, 429, "登录尝试过多，请稍后再试")
+	if !a.allowRate(w, "login", a.limiterIP(r), "登录尝试过多，请稍后再试") {
 		return
 	}
 	var input struct {
@@ -106,8 +104,7 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request, p principal
 	if !decode(w, r, &input) {
 		return
 	}
-	if !a.passwordLimits.allow(p.User.ID, 10, 15*time.Minute) {
-		fail(w, 429, "尝试过多，请稍后再试")
+	if !a.allowRate(w, "password_change", p.User.ID, "尝试过多，请稍后再试") {
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(p.User.PasswordHash), []byte(input.Current)) != nil {

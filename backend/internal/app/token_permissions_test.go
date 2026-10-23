@@ -252,10 +252,11 @@ func TestTokenAlbumPermissions(t *testing.T) {
 	for _, path := range []string{"/api/v1/images", "/api/v1/albums", "/api/v1/shares", "/api/v1/stats"} {
 		adminRequest("GET", path+"?scope=all", nil, 403)
 	}
-	for _, path := range []string{"/api/v1/tokens", "/api/v1/users", "/api/v1/settings", "/api/v1/storages", "/api/v1/processing", "/api/v1/access", "/api/v1/auth/me"} {
+	for _, path := range []string{"/api/v1/tokens", "/api/v1/users", "/api/v1/settings", "/api/v1/storages", "/api/v1/processing", "/api/v1/access", "/api/v1/rate-limits", "/api/v1/auth/me"} {
 		adminRequest("GET", path, nil, 401)
 	}
 	adminRequest("POST", "/api/v1/tokens", map[string]string{"name": "禁止派生"}, 401)
+	adminRequest("PUT", "/api/v1/rate-limits", map[string]any{"rules": defaultRateLimits()}, 401)
 	adminRequest("PUT", "/api/v1/tokens/"+issued.Item.ID, input, 401)
 	adminRequest("DELETE", "/api/v1/tokens/"+issued.Item.ID, nil, 401)
 	adminRequest("DELETE", "/api/v1/tokens/"+issued.Item.ID+"/record", nil, 401)

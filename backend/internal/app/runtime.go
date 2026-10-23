@@ -20,6 +20,7 @@ type processingSettings struct {
 }
 
 func (a *App) initRuntime() error {
+	a.rateLimits = defaultRateLimits()
 	a.processingSettings = processingSettings{Mode: "none", Quality: 82}
 	a.defaultStorage = "local"
 	a.accessRules = map[string]accessRule{}
@@ -72,6 +73,10 @@ func (a *App) initRuntime() error {
 	}
 	for _, setting := range settings {
 		switch setting.Key {
+		case "rate_limits":
+			if err = a.loadRateLimits(setting.Value); err != nil {
+				return err
+			}
 		case "app_url":
 			if err = config.ValidateURL(setting.Value); err != nil {
 				return err

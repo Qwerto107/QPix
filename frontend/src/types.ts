@@ -99,6 +99,17 @@ export interface ProcessingSettings {
   mode: "none" | "preserve" | "webp";
   quality: number;
 }
+export type RateLimitScope =
+  "login" | "share_unlock" | "password_change" | "upload" | "share_create";
+export interface RateLimitRule {
+  enabled: boolean;
+  requests: number;
+  window_seconds: number;
+}
+export interface RateLimitSettings {
+  rules: Record<RateLimitScope, RateLimitRule>;
+  defaults: Record<RateLimitScope, RateLimitRule>;
+}
 export interface StorageProfile {
   id: string;
   name: string;
