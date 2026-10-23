@@ -3,8 +3,8 @@ package database
 import (
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
 
 	"gorm.io/driver/mysql"
@@ -20,11 +20,11 @@ func Open(driver, dsn string) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch driver {
 	case "sqlite":
-		// 使用普通文件路径，避免把 DSN 参数误当成文件名；SQLite 参数在连接后统一配置。
-		if err := os.MkdirAll(filepath.Dir(dsn), 0700); err != nil {
-			return nil, fmt.Errorf("创建 SQLite 数据目录失败：%w", err)
+		uri, err := sqliteDSN(dsn)
+		if err != nil {
+			return nil, err
 		}
-		dialector = sqlite.New(sqlite.Config{DriverName: "sqlite", DSN: dsn})
+		dialector = sqlite.New(sqlite.Config{DriverName: "sqlite", DSN: uri})
 	case "postgres":
 		dialector = postgres.Open(dsn)
 	case "mysql":
@@ -38,7 +38,18 @@ func Open(driver, dsn string) (*gorm.DB, error) {
 		IgnoreRecordNotFoundError: true,
 		ParameterizedQueries:      true,
 	})
-	db, err := gorm.Open(dialector, &gorm.Config{Logger: dbLogger, TranslateError: true})
+	// 多语句操作由业务显式开启事务，单语句写入无需额外的 BEGIN/COMMIT。
+	options := &gorm.Config{
+		Logger: dbLogger, TranslateError: true, SkipDefaultTransaction: true,
+		NowFunc: func() time.Time { return time.Now().UTC() },
+	}
+	if driver == "mysql" {
+		// 缓存有容量与时限边界，减少重复预编译，也兼容已有连接字符集配置。
+		options.PrepareStmt = true
+		options.PrepareStmtMaxSize = 100
+		options.PrepareStmtTTL = 5 * time.Minute
+	}
+	db, err := gorm.Open(dialector, options)
 	if err != nil {
 		return nil, fmt.Errorf("连接 %s 数据库失败：%w", driver, err)
 	}
@@ -48,17 +59,21 @@ func Open(driver, dsn string) (*gorm.DB, error) {
 	}
 	pool.SetConnMaxLifetime(30 * time.Minute)
 	pool.SetMaxOpenConns(10)
-	pool.SetMaxIdleConns(3)
+	pool.SetMaxIdleConns(10)
+	pool.SetConnMaxIdleTime(5 * time.Minute)
+	if driver == "mysql" {
+		// 提前回收连接，减少云数据库和代理关闭长期空闲连接导致的重试。
+		pool.SetConnMaxLifetime(3 * time.Minute)
+	}
 	if driver == "sqlite" {
 		// 单连接串行执行短事务，避免 SQLite 写锁竞争；不能将数据库放到网络文件系统。
 		pool.SetMaxOpenConns(1)
 		pool.SetMaxIdleConns(1)
 		pool.SetConnMaxLifetime(0)
-		for _, sql := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON"} {
-			if err = db.Exec(sql).Error; err != nil {
-				pool.Close()
-				return nil, fmt.Errorf("配置 SQLite（%s）失败：%w", sql, err)
-			}
+		pool.SetConnMaxIdleTime(0)
+		if err = db.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("配置 SQLite 失败：%w", err)
 		}
 	}
 	return db, nil
@@ -236,15 +251,18 @@ func migratePersonalSpace(db *gorm.DB) error {
 // 旧用户 Token 保持全部本人相册仅上传；管理员 Token 停用但保留记录。
 func migrateTokenPermissions(db *gorm.DB) error {
 	var count int64
-	if err := db.Model(&SchemaMigration{}).Where("version = ?", 6).Count(&count).Error; err != nil || count > 0 {
+	if err := db.Model(&SchemaMigration{}).Where("version = ?", 6).Count(&count).Error; err != nil {
 		return err
+	}
+	if count > 0 {
+		return migrateUsedBytes(db)
 	}
 	if !db.Migrator().HasColumn(&APIToken{}, "Authorization") {
 		if err := db.Migrator().AddColumn(&APIToken{}, "Authorization"); err != nil {
 			return err
 		}
 	}
-	return db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		// authorization 是 PostgreSQL 保留字，由数据库方言负责引用列名。
 		if err := tx.Model(&APIToken{}).Where(clause.Or(
 			clause.Eq{Column: clause.Column{Name: "authorization"}, Value: nil},
@@ -258,4 +276,107 @@ func migrateTokenPermissions(db *gorm.DB) error {
 		}
 		return tx.Create(&SchemaMigration{Version: 6, AppliedAt: time.Now().UTC()}).Error
 	})
+	if err != nil {
+		return err
+	}
+	return migrateUsedBytes(db)
+}
+
+func migrateUsedBytes(db *gorm.DB) error {
+	var count int64
+	if err := db.Model(&SchemaMigration{}).Where("version = ?", 7).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return migrateListIndexes(db)
+	}
+	if !db.Migrator().HasColumn(&User{}, "UsedBytes") {
+		if err := db.Migrator().AddColumn(&User{}, "UsedBytes"); err != nil {
+			return err
+		}
+	}
+	// 启动迁移时一次性回填，待删除图片仍计入用量；回填与版本记录同一事务，可安全重试。
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&User{}).Where("1 = 1").Update("used_bytes", 0).Error; err != nil {
+			return err
+		}
+		var totals []struct {
+			UserID string
+			Bytes  int64
+		}
+		if err := tx.Model(&Image{}).Select("user_id, COALESCE(SUM(size),0) AS bytes").Group("user_id").Scan(&totals).Error; err != nil {
+			return err
+		}
+		for _, total := range totals {
+			if err := tx.Model(&User{}).Where("id = ?", total.UserID).Update("used_bytes", total.Bytes).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Create(&SchemaMigration{Version: 7, AppliedAt: time.Now().UTC()}).Error
+	})
+	if err != nil {
+		return err
+	}
+	return migrateListIndexes(db)
+}
+
+func migrateListIndexes(db *gorm.DB) error {
+	var count int64
+	if err := db.Model(&SchemaMigration{}).Where("version = ?", 8).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		// 使用完整复合索引兼容三种数据库；逐项检查兼容 MySQL 非事务 DDL 的失败重试。
+		stmt := &gorm.Statement{DB: db}
+		if err := stmt.Parse(&Image{}); err != nil {
+			return err
+		}
+		for _, suffix := range []string{"owner_ready_date", "album_ready_date", "ready_date", "storage_id"} {
+			name := db.NamingStrategy.IndexName(stmt.Table, suffix)
+			if !db.Migrator().HasIndex(&Image{}, name) {
+				if err := db.Migrator().CreateIndex(&Image{}, name); err != nil {
+					return fmt.Errorf("创建图片列表索引 %s 失败：%w", name, err)
+				}
+			}
+		}
+		if err := db.Create(&SchemaMigration{Version: 8, AppliedAt: time.Now().UTC()}).Error; err != nil {
+			return err
+		}
+	}
+	if err := ensureSearchIndex(db); err != nil {
+		return err
+	}
+	if err := migrateSQLiteTimes(db); err != nil {
+		return err
+	}
+	// 建表和新增索引后补充统计信息，避免新索引缺少优化器估算数据。
+	return optimizeSQLite(db, true)
+}
+
+func ensureSearchIndex(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		return nil
+	}
+	var installed bool
+	if err := db.Raw("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')").Scan(&installed).Error; err != nil {
+		return fmt.Errorf("检测 pg_trgm 扩展失败：%w", err)
+	}
+	if !installed {
+		slog.Warn("未安装 pg_trgm，图片名称搜索使用扫描；数据库管理员可执行 CREATE EXTENSION pg_trgm 后重启以创建搜索索引")
+		return nil
+	}
+	// 每次启动检查，使管理员稍后安装扩展也能补建；不由应用创建数据库扩展。
+	stmt := &gorm.Statement{DB: db}
+	if err := stmt.Parse(&Image{}); err != nil {
+		return err
+	}
+	name := db.NamingStrategy.IndexName(stmt.Table, "name_trgm")
+	if db.Migrator().HasIndex(&Image{}, name) {
+		return nil
+	}
+	// 仅拼接 GORM 引用过的内部标识符，兼容自定义 schema 和表名前缀。
+	if err := db.Exec("CREATE INDEX " + stmt.Quote(name) + " ON " + stmt.Quote(stmt.Table) + " USING GIN (lower(name) gin_trgm_ops)").Error; err != nil {
+		return fmt.Errorf("创建图片名称搜索索引失败（请检查 pg_trgm 是否在 search_path 中及建索引权限）：%w", err)
+	}
+	return nil
 }

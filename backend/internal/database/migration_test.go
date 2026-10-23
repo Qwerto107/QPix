@@ -13,10 +13,16 @@ func TestUpgradeV1PreservesImage(t *testing.T) {
 	}
 	pool, _ := db.DB()
 	defer pool.Close()
-	for _, model := range []any{&User{}, &Album{}, &APIToken{}} {
+	for _, model := range []any{&User{}, &Session{}, &Album{}, &APIToken{}, &Setting{}} {
 		if err = db.Migrator().CreateTable(model); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err = db.Create(&User{ID: "user", Username: "legacy-user", PasswordHash: "legacy-hash"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Migrator().DropColumn(&User{}, "UsedBytes"); err != nil {
+		t.Fatal(err)
 	}
 	// v1 图片表不含压缩列，模拟已发布版本升级，而不是只验证新建库。
 	if err = db.Exec(`CREATE TABLE images (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, album_id TEXT, name TEXT NOT NULL, storage_id TEXT NOT NULL, key TEXT NOT NULL, thumb_key TEXT, format TEXT NOT NULL, size INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, state TEXT NOT NULL, created_at DATETIME)`).Error; err != nil {
@@ -31,17 +37,29 @@ func TestUpgradeV1PreservesImage(t *testing.T) {
 	if err = db.Exec(`INSERT INTO images(id,user_id,name,storage_id,key,format,size,width,height,state) VALUES ('legacy','user','old.png','local','2026/old.png','png',1234,10,20,'ready')`).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err = db.Exec(`INSERT INTO images(id,user_id,name,storage_id,key,format,size,width,height,state) VALUES ('pending','user','pending.png','local','2026/pending.png','png',20,1,1,'deleting')`).Error; err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 2; i++ {
 		if err = Migrate(db); err != nil {
 			t.Fatal(err)
 		}
 	}
 	var row Image
+	for _, name := range []string{"idx_images_owner_ready_date", "idx_images_album_ready_date", "idx_images_ready_date", "idx_images_storage_id"} {
+		if !db.Migrator().HasIndex(&Image{}, name) {
+			t.Fatalf("升级后缺少索引：%s", name)
+		}
+	}
 	if err = db.First(&row, "id = ?", "legacy").Error; err != nil {
 		t.Fatal(err)
 	}
 	if row.Size != 1234 || row.OriginalSize != 1234 || row.StorageID != "local" || row.Key != "2026/old.png" || row.Optimized || row.CompressionStatus != "original" {
 		t.Fatalf("旧记录发生异常变更: %+v", row)
+	}
+	var owner User
+	if err = db.First(&owner, "id = ?", "user").Error; err != nil || owner.UsedBytes != 1254 {
+		t.Fatal("用量迁移应包含待删除图片，且重复迁移不能重复累加", owner.UsedBytes, err)
 	}
 }
 
@@ -55,7 +73,7 @@ func TestTokenExpiryBecomesNullable(t *testing.T) {
 	if err = db.Migrator().CreateTable(&SchemaMigration{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, model := range []any{&User{}, &Album{}, &Share{}, &AlbumMember{}} {
+	for _, model := range []any{&User{}, &Session{}, &Album{}, &Image{}, &Share{}, &ShareSession{}, &AlbumMember{}, &StorageProfile{}, &AccessRule{}} {
 		if err = db.Migrator().CreateTable(model); err != nil {
 			t.Fatal(err)
 		}

@@ -10,6 +10,7 @@ type User struct {
 	Role           string    `gorm:"size:8;not null;default:user" json:"role"`
 	Enabled        bool      `gorm:"not null;default:true" json:"enabled"`
 	QuotaBytes     int64     `gorm:"not null;default:0" json:"quota_bytes"`
+	UsedBytes      int64     `gorm:"not null;default:0" json:"-"`
 	MaxFileBytes   int64     `gorm:"not null;default:0" json:"max_file_bytes"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -64,12 +65,12 @@ type ShareSession struct {
 }
 
 type Image struct {
-	ID                string    `gorm:"primaryKey;size:32" json:"id"`
-	UserID            string    `gorm:"index:,composite:owner_date,priority:1;size:32;not null" json:"-"`
-	AlbumID           *string   `gorm:"index;size:32" json:"album_id"`
+	ID                string    `gorm:"primaryKey;size:32;index:,composite:owner_ready_date,priority:4;index:,composite:album_ready_date,priority:4;index:,composite:ready_date,priority:3" json:"id"`
+	UserID            string    `gorm:"index:,composite:owner_date,priority:1;index:,composite:owner_ready_date,priority:1;size:32;not null" json:"-"`
+	AlbumID           *string   `gorm:"index;index:,composite:album_ready_date,priority:1;size:32" json:"album_id"`
 	AlbumRef          *Album    `gorm:"foreignKey:AlbumID;references:ID;constraint:OnDelete:SET NULL" json:"-"`
 	Name              string    `gorm:"size:255;not null" json:"name"`
-	StorageID         string    `gorm:"size:32;not null" json:"storage_id"`
+	StorageID         string    `gorm:"index;size:32;not null" json:"storage_id"`
 	Key               string    `gorm:"size:255;not null" json:"-"`
 	ThumbKey          string    `gorm:"size:255" json:"-"`
 	Format            string    `gorm:"size:10;not null" json:"format"`
@@ -79,8 +80,8 @@ type Image struct {
 	CompressionStatus string    `gorm:"size:32;not null;default:original" json:"compression_status"`
 	Width             int       `gorm:"not null" json:"width"`
 	Height            int       `gorm:"not null" json:"height"`
-	State             string    `gorm:"index;size:16;not null" json:"-"`
-	CreatedAt         time.Time `gorm:"index:,composite:owner_date,priority:2" json:"created_at"`
+	State             string    `gorm:"index;index:,composite:owner_ready_date,priority:2;index:,composite:album_ready_date,priority:2;index:,composite:ready_date,priority:1;size:16;not null" json:"-"`
+	CreatedAt         time.Time `gorm:"index:,composite:owner_date,priority:2;index:,composite:owner_ready_date,priority:3;index:,composite:album_ready_date,priority:3;index:,composite:ready_date,priority:2" json:"created_at"`
 }
 
 type StorageProfile struct {

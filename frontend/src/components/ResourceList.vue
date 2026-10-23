@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import { Plus, Copy } from "@lucide/vue";
 import Modal from "./Modal.vue";
 import TokenEditor from "./TokenEditor.vue";
@@ -43,9 +43,7 @@ const rows = ref<Row[]>([]),
   total = ref(0),
   loading = ref(false),
   error = ref("");
-const pages = computed(() =>
-  Math.max(1, Math.ceil(total.value / Number(limit.value))),
-);
+const cursors = ref([""]), nextCursor = ref("");
 const tokenEditor = ref(false),
   editingToken = ref<APIToken | null>(null);
 function editToken(token?: APIToken) {
@@ -71,6 +69,22 @@ let requestID = 0,
   timer: ReturnType<typeof setTimeout> | undefined,
   imageRequest = 0;
 async function load() {
+  page.value = 1;
+  cursors.value = [""];
+  nextCursor.value = "";
+  await fetchPage();
+}
+async function turnPage(delta: number) {
+  const previous = page.value;
+  if (delta > 0) {
+    if (!nextCursor.value) return;
+    cursors.value[page.value] = nextCursor.value;
+  }
+  page.value += delta;
+  await fetchPage();
+  if (error.value) page.value = previous;
+}
+async function fetchPage() {
   const request = ++requestID;
   loading.value = true;
   error.value = "";
@@ -80,17 +94,19 @@ async function load() {
       q: q.value,
       status: status.value,
       user_id: owner.value,
-      page: String(page.value),
+      pagination: "cursor",
+      cursor: cursors.value[page.value - 1] || "",
       limit: limit.value,
       order: sort.value,
     });
     const data = await api<RecordPage<Row>>(`/${props.kind}?${params}`);
     if (request !== requestID) return;
     rows.value = data.items;
-    total.value = data.total;
-    if (page.value > pages.value) {
-      page.value = pages.value;
-      void load();
+    if (data.total !== null) total.value = data.total;
+    nextCursor.value = data.next_cursor;
+    if (!data.items.length && page.value > 1) {
+      page.value--;
+      await fetchPage();
     }
   } catch (e) {
     if (request === requestID) error.value = message(e);
@@ -442,20 +458,14 @@ onBeforeUnmount(() => {
       /><button
         class="button compact"
         :disabled="page <= 1 || loading"
-        @click="
-          page--;
-          load();
-        "
+        @click="turnPage(-1)"
       >
         上一页</button
-      ><span>{{ page }} / {{ pages }}</span
+      ><span>第 {{ page }} 页</span
       ><button
         class="button compact"
-        :disabled="page >= pages || loading"
-        @click="
-          page++;
-          load();
-        "
+        :disabled="!nextCursor || loading"
+        @click="turnPage(1)"
       >
         下一页
       </button>

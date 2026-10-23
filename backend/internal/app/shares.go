@@ -28,21 +28,12 @@ func (a *App) shareTitle(db *gorm.DB, row database.Share) (string, error) {
 	return image.Name, err
 }
 
-func (a *App) shareView(row database.Share) (shareView, error) {
+func (a *App) shareView(row database.Share, owner database.User, title string) (shareView, error) {
 	token, err := secret.Open(a.masterKey, row.TokenCipher, "share:"+row.ID)
 	if err != nil {
 		return shareView{}, err
 	}
-	title, err := a.shareTitle(a.db, row)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		title = "目标已删除"
-		err = nil
-	}
-	var owner database.User
-	if err == nil {
-		err = a.db.First(&owner, "id = ?", row.UserID).Error
-	}
-	return shareView{Share: row, URL: "/s/" + token, HasPassword: row.PasswordHash != "", Title: title, OwnerName: owner.Username, OwnerRole: owner.Role}, err
+	return shareView{Share: row, URL: "/s/" + token, HasPassword: row.PasswordHash != "", Title: title, OwnerName: owner.Username, OwnerRole: owner.Role}, nil
 }
 
 func (a *App) listShares(w http.ResponseWriter, r *http.Request, p principal) {
@@ -71,31 +62,57 @@ func (a *App) listShares(w http.ResponseWriter, r *http.Request, p principal) {
 	case "revoked":
 		q = q.Where("revoked_at IS NOT NULL")
 	}
-	var total int64
-	if err := q.Count(&total).Error; err != nil {
-		internal(w, err)
-		return
-	}
-	page, limit := listPage(r)
-	var rows []database.Share
+	_, limit := listPage(r)
 	order := "created_at DESC"
 	if r.URL.Query().Get("order") == "asc" {
 		order = "created_at ASC"
 	}
-	if err := q.Order(order).Order("id DESC").Offset((page - 1) * limit).Limit(limit).Find(&rows).Error; err != nil {
-		internal(w, err)
+	rows, pagination, err := paginate[database.Share](q, r, limit, order+", id DESC")
+	if err != nil {
+		paginationError(w, err)
 		return
 	}
 	items := make([]shareView, 0, len(rows))
+	ownerIDs := make([]string, 0, len(rows))
+	targetIDs := make([]string, 0, len(rows))
 	for _, row := range rows {
-		item, err := a.shareView(row)
+		ownerIDs = append(ownerIDs, row.UserID)
+		targetIDs = append(targetIDs, row.TargetID)
+	}
+	owners, err := usersByID(db, ownerIDs)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	var images []database.Image
+	if len(targetIDs) > 0 {
+		if err := db.Select("id", "name").Where("id IN ? AND state = ?", targetIDs, "ready").Find(&images).Error; err != nil {
+			internal(w, err)
+			return
+		}
+	}
+	titles := make(map[string]string, len(images))
+	for _, image := range images {
+		titles[image.ID] = image.Name
+	}
+	for _, row := range rows {
+		owner, exists := owners[row.UserID]
+		if !exists {
+			internal(w, gorm.ErrRecordNotFound)
+			return
+		}
+		title, exists := titles[row.TargetID]
+		if !exists {
+			title = "目标已删除"
+		}
+		item, err := a.shareView(row, owner, title)
 		if err != nil {
 			internal(w, err)
 			return
 		}
 		items = append(items, item)
 	}
-	respond(w, 200, map[string]any{"items": items, "total": total, "page": page, "limit": limit})
+	respond(w, 200, pagination.response(items))
 }
 
 func (a *App) createShare(w http.ResponseWriter, r *http.Request, p principal) {
@@ -106,6 +123,11 @@ func (a *App) createShare(w http.ResponseWriter, r *http.Request, p principal) {
 		ExpiresAt *time.Time `json:"expires_at"`
 	}
 	if !decode(w, r, &input) {
+		return
+	}
+	if !a.shareCreateLimits.allow(p.User.ID, 30, time.Minute) {
+		w.Header().Set("Retry-After", "60")
+		fail(w, 429, "创建分享过于频繁，请稍后重试")
 		return
 	}
 	if input.Kind != "image" || input.TargetID == "" {
@@ -149,11 +171,34 @@ func (a *App) createShare(w http.ResponseWriter, r *http.Request, p principal) {
 		}
 		row.PasswordHash = string(hash)
 	}
+	locked, fresh, ok := a.lockWrite(w, r, true, "write")
+	if !ok {
+		return
+	}
+	defer locked.release()
+	w, p = locked, fresh
+	if p.User.ID != row.UserID {
+		fail(w, 401, "登录身份已变化，请重新登录后重试")
+		return
+	}
+	// 密码计算期间目标可能被删除、移动，Token 授权也可能变化，不能沿用旧查询结果。
+	if err := a.manageableImages(a.db.WithContext(r.Context()), p).First(&target, "id = ? AND state = ?", input.TargetID, "ready").Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			fail(w, 404, "分享目标不存在")
+		} else {
+			internal(w, err)
+		}
+		return
+	}
+	if input.ExpiresAt != nil && !input.ExpiresAt.After(time.Now()) {
+		fail(w, 400, "到期时间必须晚于当前时间")
+		return
+	}
 	if err = a.db.WithContext(r.Context()).Create(&row).Error; err != nil {
 		internal(w, err)
 		return
 	}
-	view, err := a.shareView(row)
+	view, err := a.shareView(row, p.User, target.Name)
 	if err != nil {
 		internal(w, err)
 		return
@@ -250,8 +295,6 @@ func (a *App) shareUnlocked(r *http.Request, row database.Share) (bool, error) {
 }
 
 func (a *App) publicShare(w http.ResponseWriter, r *http.Request) {
-	a.policyMu.RLock()
-	defer a.policyMu.RUnlock()
 	row, err := a.findShare(r)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -297,17 +340,14 @@ func (a *App) publicShare(w http.ResponseWriter, r *http.Request) {
 		view := a.imageView(image)
 		// 分享中的文件必须走分享网关，不能向访客暴露绕过口令的原始链接。
 		view.URL = "/si/" + r.PathValue("token") + "/" + image.ID + "." + image.Format
-		view.ThumbnailURL = view.URL
-		if image.ThumbKey != "" {
-			view.ThumbnailURL = "/si/" + r.PathValue("token") + "/" + image.ID + "-thumb.png"
-		}
+		view.ThumbnailURL = "/si/" + r.PathValue("token") + "/" + thumbnailFile(image)
 		items = append(items, view)
 	}
 	respond(w, 200, map[string]any{"locked": false, "title": title, "expires_at": row.ExpiresAt, "items": items, "total": total, "page": page, "limit": limit})
 }
 
 func (a *App) unlockShare(w http.ResponseWriter, r *http.Request) {
-	if !a.loginLimits.allow("share:"+a.requesterIP(r).String(), 15, 15*time.Minute) {
+	if !a.shareLimits.allow(a.limiterIP(r), 15, 15*time.Minute) {
 		w.Header().Set("Retry-After", "900")
 		fail(w, 429, "尝试过于频繁，请稍后重试")
 		return
@@ -318,8 +358,6 @@ func (a *App) unlockShare(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	a.policyMu.RLock()
-	defer a.policyMu.RUnlock()
 	row, err := a.findShare(r)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -336,6 +374,18 @@ func (a *App) unlockShare(w http.ResponseWriter, r *http.Request) {
 	}
 	if row.PasswordHash != "" && (len(input.Password) > 72 || bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(input.Password)) != nil) {
 		fail(w, 403, "分享密码错误")
+		return
+	}
+	locked := a.lockPolicy(w)
+	defer locked.release()
+	w = locked
+	// 分享可能在密码校验期间到期、撤销或删除，写入解锁会话前再次确认。
+	if _, err := a.findShare(r); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.NotFound(w, r)
+		} else {
+			internal(w, err)
+		}
 		return
 	}
 	if row.PasswordHash != "" {
@@ -368,8 +418,6 @@ func (a *App) shareImages(db *gorm.DB, row database.Share) *gorm.DB {
 func (a *App) serveShareImage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	a.policyMu.RLock()
-	defer a.policyMu.RUnlock()
 	row, err := a.findShare(r)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -388,7 +436,7 @@ func (a *App) serveShareImage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.serveStoredImage(w, r, func(db *gorm.DB) *gorm.DB { return a.shareImages(db, row) })
+	a.serveStoredImage(w, r, func(image database.Image) bool { return image.ID == row.TargetID })
 }
 
 // 分享分页复用图库上限，不允许请求一次读取整个相册。

@@ -175,6 +175,15 @@ func (a *App) requesterIP(r *http.Request) netip.Addr {
 	return address
 }
 
+func (a *App) limiterIP(r *http.Request) string {
+	address := a.requesterIP(r)
+	// IPv6 按 /64 计数，避免同一网段轮换地址快速填满限流表。
+	if address.Is6() {
+		return netip.PrefixFrom(address, 64).Masked().String()
+	}
+	return address.String()
+}
+
 func requestScope(r *http.Request) string {
 	// 统一认证入口在识别真实账号角色后检查网络规则，不能预先套用管理员规则。
 	if strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
@@ -279,11 +288,12 @@ func (a *App) updateAccess(w http.ResponseWriter, r *http.Request, p principal) 
 	referers, _ := json.Marshal(rule.input.Referers)
 	row := database.AccessRule{Scope: input.Scope, IPEnabled: input.IPEnabled, IPs: string(ips), RefererEnabled: input.RefererEnabled, Referers: string(referers), AllowEmptyReferer: input.AllowEmptyReferer}
 	a.settingsMu.Lock()
-	defer a.settingsMu.Unlock()
 	if err = a.db.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "scope"}}, DoUpdates: clause.AssignmentColumns([]string{"ip_enabled", "ips", "referer_enabled", "referers", "allow_empty_referer"})}).Create(&row).Error; err != nil {
+		a.settingsMu.Unlock()
 		internal(w, err)
 		return
 	}
 	a.accessRules[input.Scope] = rule
+	a.settingsMu.Unlock()
 	respond(w, 200, rule.input)
 }

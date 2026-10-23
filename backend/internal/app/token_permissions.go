@@ -188,6 +188,7 @@ func (a *App) authenticateToken(w http.ResponseWriter, r *http.Request, p *princ
 	}
 	p.Token = &policy
 	p.TokenID = row.ID
+	p.TokenLastUsed = row.LastUsedAt
 	return true
 }
 func authorizeTokenRoute(w http.ResponseWriter, r *http.Request, p *principal) bool {

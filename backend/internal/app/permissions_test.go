@@ -274,6 +274,23 @@ func testPermissionsAndShares(t *testing.T, a *App, admin *testClient, fixture [
 	if err := a.db.First(&storedToken, "id = ?", tokenData.Item.ID).Error; err != nil || storedToken.LastUsedAt == nil {
 		t.Fatal("未记录 Token 使用时间", err)
 	}
+	lastUsed := *storedToken.LastUsedAt
+	for _, age := range []time.Duration{0, 2 * time.Minute} {
+		if age > 0 {
+			if err := a.db.Model(&database.APIToken{}).Where("id = ?", tokenData.Item.ID).Update("last_used_at", time.Now().UTC().Add(-age)).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+		request, _ = http.NewRequest("GET", admin.server.URL+"/api/v1/upload-options", nil)
+		request.Header.Set("Authorization", "Bearer "+tokenData.Token)
+		guest.send(request, 200)
+		if err := a.db.First(&storedToken, "id = ?", tokenData.Item.ID).Error; err != nil || storedToken.LastUsedAt == nil {
+			t.Fatal("无法读取 Token 使用时间", err)
+		}
+		if age == 0 && !storedToken.LastUsedAt.Equal(lastUsed) || age > 0 && !storedToken.LastUsedAt.After(lastUsed) {
+			t.Fatal("Token 上次使用时间未按一分钟间隔落库")
+		}
+	}
 	admin.request("DELETE", "/api/v1/tokens/"+tokenData.Item.ID, nil, 200)
 	guest.upload(fixture, "revoked.png", "", tokenData.Token, 401)
 	if err := a.db.First(&storedToken, "id = ?", tokenData.Item.ID).Error; err != nil || storedToken.RevokedAt == nil {
@@ -288,6 +305,10 @@ func testPermissionsAndShares(t *testing.T, a *App, admin *testClient, fixture [
 	var disposable database.Album
 	json.Unmarshal(alice.request("POST", "/api/v1/albums", map[string]string{"name": "待删除"}, 201), &disposable)
 	image := decodeImage(alice.upload(fixture, "delete.png", disposable.ID, "", 201))
+	otherPending := decodeImage(bob.upload(fixture, "pending-in-other-album.png", "", "", 201))
+	if err := a.db.Model(&database.Image{}).Where("id = ?", otherPending.ID).Update("state", "deleting").Error; err != nil {
+		t.Fatal(err)
+	}
 	alice.request("DELETE", "/api/v1/albums/"+disposable.ID, map[string]string{"action": "delete"}, 200)
 	guest.request("GET", image.URL, nil, 404)
 	var imageCount int64
@@ -295,6 +316,10 @@ func testPermissionsAndShares(t *testing.T, a *App, admin *testClient, fixture [
 	if imageCount != 0 {
 		t.Fatal("删除相册未清理图片")
 	}
+	if err := a.db.Model(&database.Image{}).Where("id = ? AND state = ?", otherPending.ID, "deleting").Count(&imageCount).Error; err != nil || imageCount != 1 {
+		t.Fatal("相册删除清理了其他相册的待删除图片", err)
+	}
+	admin.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{otherPending.ID}}, 200)
 	// 容量边界按实际保存大小累计；失败上传释放预占，单张限制检查原文件大小。
 	quotaInput := userInput{Enabled: true, QuotaBytes: int64(len(fixture)), MaxFileBytes: int64(len(fixture))}
 	admin.request("PUT", "/api/v1/users/"+aliceID, quotaInput, 200)

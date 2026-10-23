@@ -82,6 +82,7 @@ const albumMode = ref(!props.all),
   destination = ref(""),
   confirmDelete = ref(false);
 const selected = ref(new Set<string>());
+const cursors = ref([""]), nextCursor = ref("");
 const deleteTargets = ref<ImageItem[]>([]);
 const root = computed(() => !props.albumID && albumMode.value),
   activeAlbum = computed(() =>
@@ -154,19 +155,37 @@ const policyChanges = computed(() => {
 let requestID = 0,
   timer: ReturnType<typeof setTimeout> | undefined;
 async function load() {
+  page.value = 1;
+  cursors.value = [""];
+  nextCursor.value = "";
+  await fetchPage(true);
+}
+async function turnPage(delta: number) {
+  const previous = page.value;
+  if (!root.value && delta > 0) {
+    if (!nextCursor.value) return;
+    cursors.value[page.value] = nextCursor.value;
+  }
+  page.value += delta;
+  await fetchPage();
+  if (error.value) page.value = previous;
+}
+async function fetchPage(refreshMeta = false) {
   const request = ++requestID;
   loading.value = true;
   error.value = "";
   try {
     const params = new URLSearchParams({ scope: props.all ? "all" : "own" });
-    const [albumData, statData] = await Promise.all([
-      api<Album[]>(`/albums?${params}`),
-      api<Stats>(`/stats?${params}`),
-    ]);
-    if (request !== requestID) return;
-    albums.value = albumData;
-    stats.value = statData;
-    if (props.albumID && !albumData.some((v) => v.id === props.albumID)) {
+    if (refreshMeta) {
+      const [albumData, statData] = await Promise.all([
+        api<Album[]>(`/albums?${params}`),
+        api<Stats>(`/stats?${params}`),
+      ]);
+      if (request !== requestID) return;
+      albums.value = albumData;
+      stats.value = statData;
+    }
+    if (props.albumID && !albums.value.some((v) => v.id === props.albumID)) {
       emit("folder", "");
       return;
     }
@@ -175,21 +194,29 @@ async function load() {
       params.set("album_id", props.albumID);
       params.set("q", q.value);
       params.set("user_id", props.all ? owner.value : "");
-      params.set("page", String(page.value));
+      params.set("pagination", "cursor");
+      params.set("cursor", cursors.value[page.value - 1] || "");
       params.set("limit", limit.value);
       params.set("sort", field!);
       params.set("order", order!);
       const data = await api<ImagePage>(`/images?${params}`);
       if (request !== requestID) return;
       images.value = data.items;
-      total.value = data.total;
+      if (data.total !== null) total.value = data.total;
+      nextCursor.value = data.next_cursor;
+      // 图片可能在翻页期间被删除；空页退回前一页，重新刷新可更新总数。
+      if (!data.items.length && page.value > 1) {
+        page.value--;
+        await fetchPage();
+        return;
+      }
       selected.value = new Set(
         [...selected.value].filter((id) => data.items.some((v) => v.id === id)),
       );
     }
-    if (page.value > pages.value) {
+    if (root.value && page.value > pages.value) {
       page.value = pages.value;
-      void load();
+      void fetchPage();
     }
   } catch (e) {
     if (request === requestID) error.value = message(e);
@@ -739,20 +766,14 @@ onBeforeUnmount(() => {
       /><button
         class="button compact"
         :disabled="page <= 1 || loading"
-        @click="
-          page--;
-          load();
-        "
+        @click="turnPage(-1)"
       >
         上一页</button
-      ><span>{{ page }} / {{ pages }}</span
+      ><span>{{ root ? `${page} / ${pages}` : `第 ${page} 页` }}</span
       ><button
         class="button compact"
-        :disabled="page >= pages || loading"
-        @click="
-          page++;
-          load();
-        "
+        :disabled="(root ? page >= pages : !nextCursor) || loading"
+        @click="turnPage(1)"
       >
         下一页
       </button>

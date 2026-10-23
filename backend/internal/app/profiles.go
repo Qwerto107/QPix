@@ -148,7 +148,8 @@ func (a *App) parseProfile(input storageInput, row database.StorageProfile) (dat
 
 func (a *App) listProfiles(w http.ResponseWriter, r *http.Request, p principal) {
 	a.settingsMu.RLock()
-	defer a.settingsMu.RUnlock()
+	defaultStorage := a.defaultStorage
+	a.settingsMu.RUnlock()
 	var rows []database.StorageProfile
 	db := a.db.WithContext(r.Context())
 	if err := db.Order("created_at ASC").Find(&rows).Error; err != nil {
@@ -156,13 +157,20 @@ func (a *App) listProfiles(w http.ResponseWriter, r *http.Request, p principal) 
 		return
 	}
 	items := make([]profileView, 0, len(rows))
+	var totals []struct {
+		StorageID string
+		Count     int64
+	}
+	if err := db.Model(&database.Image{}).Select("storage_id, COUNT(*) AS count").Group("storage_id").Scan(&totals).Error; err != nil {
+		internal(w, err)
+		return
+	}
+	counts := make(map[string]int64, len(totals))
+	for _, total := range totals {
+		counts[total.StorageID] = total.Count
+	}
 	for _, row := range rows {
-		var count int64
-		if err := db.Model(&database.Image{}).Where("storage_id = ?", row.ID).Count(&count).Error; err != nil {
-			internal(w, err)
-			return
-		}
-		items = append(items, profileView{StorageProfile: row, Default: a.defaultStorage == row.ID, HasCredentials: row.Credentials != "", Images: count})
+		items = append(items, profileView{StorageProfile: row, Default: defaultStorage == row.ID, HasCredentials: row.Credentials != "", Images: counts[row.ID]})
 	}
 	respond(w, 200, items)
 }
@@ -172,8 +180,6 @@ func (a *App) createProfile(w http.ResponseWriter, r *http.Request, p principal)
 	if !decode(w, r, &input) {
 		return
 	}
-	a.settingsMu.Lock()
-	defer a.settingsMu.Unlock()
 	row, err := a.parseProfile(input, database.StorageProfile{ID: randomID()})
 	if err != nil {
 		fail(w, 400, err.Error())
@@ -188,7 +194,9 @@ func (a *App) createProfile(w http.ResponseWriter, r *http.Request, p principal)
 		internal(w, err)
 		return
 	}
+	a.settingsMu.Lock()
 	a.profiles[row.ID], a.stores[row.ID] = row, driver
+	a.settingsMu.Unlock()
 	respond(w, 201, profileView{StorageProfile: row, HasCredentials: row.Credentials != ""})
 }
 
@@ -197,11 +205,12 @@ func (a *App) updateProfile(w http.ResponseWriter, r *http.Request, p principal)
 	if !decode(w, r, &input) {
 		return
 	}
-	// 上传在文件和数据库落盘完成前持有读锁，配置变更不会与存储引用建立过程交错。
-	a.settingsMu.Lock()
-	defer a.settingsMu.Unlock()
 	id := r.PathValue("id")
+	a.settingsMu.RLock()
 	old, exists := a.profiles[id]
+	defaultStorage := a.defaultStorage
+	active := a.storageUploads[id]
+	a.settingsMu.RUnlock()
 	if !exists {
 		fail(w, 404, "存储配置不存在")
 		return
@@ -211,7 +220,7 @@ func (a *App) updateProfile(w http.ResponseWriter, r *http.Request, p principal)
 		fail(w, 400, err.Error())
 		return
 	}
-	if id == a.defaultStorage && !row.Enabled {
+	if id == defaultStorage && !row.Enabled {
 		fail(w, 409, "请先切换默认存储，再停用此配置")
 		return
 	}
@@ -222,8 +231,8 @@ func (a *App) updateProfile(w http.ResponseWriter, r *http.Request, p principal)
 		return
 	}
 	locationChanged := row.Kind != old.Kind || row.Root != old.Root || row.Endpoint != old.Endpoint || row.Region != old.Region || row.Bucket != old.Bucket || row.Prefix != old.Prefix || row.PathStyle != old.PathStyle
-	if references > 0 && locationChanged {
-		fail(w, 409, "此存储已有图片，不能修改类型、目录、Endpoint、Region、Bucket、前缀或寻址方式，请新建配置")
+	if (references > 0 || active > 0) && locationChanged {
+		fail(w, 409, "此存储已有图片或在途上传，不能修改类型、目录、Endpoint、Region、Bucket、前缀或寻址方式，请新建配置")
 		return
 	}
 	driver, err := a.buildStore(row)
@@ -231,59 +240,75 @@ func (a *App) updateProfile(w http.ResponseWriter, r *http.Request, p principal)
 		fail(w, 400, "无法初始化存储，请检查目录、凭据或主密钥")
 		return
 	}
+	// 构建驱动时不持设置锁；保存位置变更前再次检查期间新增的在途上传。
+	a.settingsMu.Lock()
+	if locationChanged && a.storageUploads[id] > 0 {
+		a.settingsMu.Unlock()
+		fail(w, 409, "此存储有在途上传，暂不能修改存储位置")
+		return
+	}
 	if err = db.Save(&row).Error; err != nil {
+		a.settingsMu.Unlock()
 		internal(w, err)
 		return
 	}
 	a.profiles[id], a.stores[id] = row, driver
-	respond(w, 200, profileView{StorageProfile: row, Default: id == a.defaultStorage, HasCredentials: row.Credentials != "", Images: references})
+	a.settingsMu.Unlock()
+	respond(w, 200, profileView{StorageProfile: row, Default: id == defaultStorage, HasCredentials: row.Credentials != "", Images: references})
 }
 
 func (a *App) deleteProfile(w http.ResponseWriter, r *http.Request, p principal) {
 	a.settingsMu.Lock()
-	defer a.settingsMu.Unlock()
 	id := r.PathValue("id")
 	if _, exists := a.profiles[id]; !exists {
+		a.settingsMu.Unlock()
 		fail(w, 404, "存储配置不存在")
 		return
 	}
 	if id == "local" || id == a.defaultStorage {
+		a.settingsMu.Unlock()
 		fail(w, 409, "默认配置和初始本地配置不能删除")
 		return
 	}
 	var count int64
 	db := a.db.WithContext(r.Context())
 	if err := db.Model(&database.Image{}).Where("storage_id = ?", id).Count(&count).Error; err != nil {
+		a.settingsMu.Unlock()
 		internal(w, err)
 		return
 	}
-	if count > 0 {
-		fail(w, 409, "此存储仍有图片引用，不能删除")
+	if count > 0 || a.storageUploads[id] > 0 {
+		a.settingsMu.Unlock()
+		fail(w, 409, "此存储仍有图片引用或在途上传，不能删除")
 		return
 	}
 	if err := db.Delete(&database.StorageProfile{}, "id = ?", id).Error; err != nil {
+		a.settingsMu.Unlock()
 		internal(w, err)
 		return
 	}
 	delete(a.profiles, id)
 	delete(a.stores, id)
+	a.settingsMu.Unlock()
 	respond(w, 200, map[string]bool{"ok": true})
 }
 
 func (a *App) defaultProfile(w http.ResponseWriter, r *http.Request, p principal) {
 	a.settingsMu.Lock()
-	defer a.settingsMu.Unlock()
 	id := r.PathValue("id")
 	row, exists := a.profiles[id]
 	if !exists || !row.Enabled {
+		a.settingsMu.Unlock()
 		fail(w, 400, "请选择已启用的存储")
 		return
 	}
 	if err := saveSetting(a.db.WithContext(r.Context()), "default_storage", id); err != nil {
+		a.settingsMu.Unlock()
 		internal(w, err)
 		return
 	}
 	a.defaultStorage = id
+	a.settingsMu.Unlock()
 	respond(w, 200, map[string]bool{"ok": true})
 }
 
@@ -295,6 +320,7 @@ func (a *App) testProfile(w http.ResponseWriter, r *http.Request, p principal) {
 		fail(w, 404, "存储配置不存在")
 		return
 	}
+	releasePolicy(w)
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	key := ".qpix-probe/" + randomID() + ".txt"

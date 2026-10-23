@@ -26,31 +26,41 @@ import (
 )
 
 type App struct {
-	cfg                       config.Config
-	db                        *gorm.DB
-	stores                    map[string]storage.Store
-	processing                chan struct{}
-	loginLimits, uploadLimits limiter
-	settingsMu                sync.RWMutex
-	publicURL                 string
-	appURL                    string
-	secureCookie              bool
-	maxPixels                 int64
-	maxUploadBytes            int64
-	profiles                  map[string]database.StorageProfile
-	masterKey                 []byte
-	defaultStorage            string
-	processingSettings        processingSettings
-	accessRules               map[string]accessRule
-	trustedProxies            []netip.Prefix
-	policyMu                  sync.RWMutex
-	quotaMu                   sync.Mutex
-	frontend                  http.Handler
+	cfg                         config.Config
+	db                          *gorm.DB
+	stores                      map[string]storage.Store
+	processing                  chan struct{}
+	loginLimits, uploadLimits   limiter
+	passwordLimits, shareLimits limiter
+	shareCreateLimits           limiter
+	uploadMu                    sync.Mutex
+	uploads                     map[string]int
+	uploadCount                 int
+	settingsMu                  sync.RWMutex
+	publicURL                   string
+	appURL                      string
+	secureCookie                bool
+	maxPixels                   int64
+	maxUploadBytes              int64
+	profiles                    map[string]database.StorageProfile
+	storageUploads              map[string]int
+	masterKey                   []byte
+	defaultStorage              string
+	processingSettings          processingSettings
+	accessRules                 map[string]accessRule
+	trustedProxies              []netip.Prefix
+	policyMu                    sync.Mutex
+	quotaMu                     sync.Mutex
+	albumRulesMu                sync.Mutex
+	albumRules                  map[string]cachedAlbumRule
+	albumRulesCleanup           time.Time
+	frontend                    http.Handler
 }
 
 type principal struct {
 	Token          *tokenAuthorization
 	TokenID        string
+	TokenLastUsed  *time.Time
 	TokenOperation string
 	User           database.User
 	Session        *database.Session
@@ -116,7 +126,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", a.login)
 	mux.HandleFunc("GET /api/v1/auth/me", a.protect(a.me, false))
 	mux.HandleFunc("POST /api/v1/auth/logout", a.protect(a.logout, false))
-	mux.HandleFunc("PUT /api/v1/auth/password", a.secure(a.changePassword, false, "write"))
+	mux.HandleFunc("PUT /api/v1/auth/password", a.preparedWrite(a.changePassword, false, "write"))
 	mux.HandleFunc("GET /api/v1/images", a.protect(a.listImages, true))
 	mux.HandleFunc("POST /api/v1/images", a.protect(a.upload, true))
 	mux.HandleFunc("PATCH /api/v1/images/{id}", a.secure(a.updateImage, true, "write"))
@@ -129,12 +139,12 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/albums/{id}/default", a.secure(a.setDefaultAlbum, true, "write"))
 	mux.HandleFunc("POST /api/v1/images/batch-move", a.secure(a.moveImages, true, "write"))
 	mux.HandleFunc("GET /api/v1/users", a.admin(a.listUsers, false))
-	mux.HandleFunc("POST /api/v1/users", a.admin(a.saveUser, true))
-	mux.HandleFunc("PUT /api/v1/users/{id}", a.admin(a.saveUser, true))
+	mux.HandleFunc("POST /api/v1/users", a.preparedWrite(a.saveUser, false, "admin-write"))
+	mux.HandleFunc("PUT /api/v1/users/{id}", a.preparedWrite(a.saveUser, false, "admin-write"))
 	mux.HandleFunc("DELETE /api/v1/users/{id}", a.admin(a.deleteUser, true))
 	mux.HandleFunc("GET /api/v1/upload-options", a.protect(a.uploadOptions, true))
 	mux.HandleFunc("GET /api/v1/shares", a.protect(a.listShares, true))
-	mux.HandleFunc("POST /api/v1/shares", a.secure(a.createShare, true, "write"))
+	mux.HandleFunc("POST /api/v1/shares", a.preparedWrite(a.createShare, true, "write"))
 	mux.HandleFunc("DELETE /api/v1/shares/{id}", a.secure(a.revokeShare, true, "write"))
 	mux.HandleFunc("DELETE /api/v1/shares/{id}/record", a.secure(a.deleteShareRecord, true, "write"))
 	mux.HandleFunc("GET /api/v1/public-shares/{token}", a.publicShare)
@@ -217,73 +227,103 @@ func (a *App) admin(next protectedHandler, write bool) http.HandlerFunc {
 }
 
 func (a *App) secure(next protectedHandler, allowToken bool, mode string) http.HandlerFunc {
+	return a.secureWithPolicy(next, allowToken, mode, true)
+}
+
+// 昂贵的密码计算由处理函数在锁外完成，写入前必须调用 lockWrite 重新鉴权。
+func (a *App) preparedWrite(next protectedHandler, allowToken bool, mode string) http.HandlerFunc {
+	return a.secureWithPolicy(next, allowToken, mode, false)
+}
+
+func (a *App) secureWithPolicy(next protectedHandler, allowToken bool, mode string, autoLock bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 相册删除与策略写操作同上传互斥，避免建立悬空引用或使用已变更的规则。
-		if mode == "admin-write" || mode == "write" {
-			a.policyMu.Lock()
-			defer a.policyMu.Unlock()
-		} else {
-			a.policyMu.RLock()
-			defer a.policyMu.RUnlock()
-		}
-		db := a.db.WithContext(r.Context())
-		var p principal
-		if header := r.Header.Get("Authorization"); header != "" {
-			if !allowToken || !strings.HasPrefix(header, "Bearer ") {
-				fail(w, 401, "此接口不接受该凭据")
-				return
-			}
-			if !a.authenticateToken(w, r, &p) {
-				return
-			}
-		} else {
-			cookie, err := r.Cookie("qpix_session")
-			if err != nil {
-				fail(w, 401, "请先登录")
-				return
-			}
-			var session database.Session
-			if err = db.First(&session, "id = ? AND expires_at > ?", digest(cookie.Value), time.Now().UTC()).Error; err != nil {
-				authError(w, err, "登录已失效，请重新登录")
-				return
-			}
-			if err = db.First(&p.User, "id = ?", session.UserID).Error; err != nil {
-				authError(w, err, "账号不存在")
-				return
-			}
-			if r.Method != "GET" && r.Method != "HEAD" && subtle.ConstantTimeCompare([]byte(session.CSRF), []byte(r.Header.Get("X-CSRF-Token"))) != 1 {
-				fail(w, 403, "安全校验失败，请刷新页面")
-				return
-			}
-			p.Session = &session
-		}
-		if !p.User.Enabled {
-			fail(w, 401, "账号已停用")
+		p, ok := a.authenticate(w, r, allowToken, mode)
+		if !ok {
 			return
 		}
-		if strings.HasPrefix(mode, "admin") && p.User.Role != "admin" {
-			fail(w, 403, "此账号没有操作权限")
-			return
-		}
-		if p.Token != nil && !authorizeTokenRoute(w, r, &p) {
-			return
-		}
-		if !(r.Method == "POST" && r.URL.Path == "/api/v1/images") && !strings.HasPrefix(r.URL.Path, "/i/") {
-			if p.User.Role == "admin" && p.Token == nil {
-				if !a.enforceScope(w, r, "admin") {
+		// 上传自行在提交阶段加锁；其他写接口先在锁外完成有界请求体接收。
+		upload := r.Method == "POST" && r.URL.Path == "/api/v1/images"
+		if r.Method != "GET" && r.Method != "HEAD" && !upload {
+			if !bufferJSONBody(w, r) {
+				return
+			}
+			if autoLock {
+				locked, fresh, ok := a.lockWrite(w, r, allowToken, mode)
+				if !ok {
 					return
 				}
+				defer locked.release()
+				w, p = locked, fresh
 			}
 		}
 		if p.Token != nil {
 			now := time.Now().UTC()
-			if err := db.Model(&database.APIToken{}).Where("id = ?", p.TokenID).Update("last_used_at", now).Error; err != nil {
-				internal(w, err)
-				return
+			cutoff := now.Add(-time.Minute)
+			// 鉴权查询已取得上次使用时刻；大多数请求无需额外写库，并发首次使用由条件更新去重。
+			if p.TokenLastUsed == nil || !p.TokenLastUsed.After(cutoff) {
+				if err := a.db.WithContext(r.Context()).Model(&database.APIToken{}).
+					Where("id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", p.TokenID, now).
+					Where("last_used_at IS NULL OR last_used_at <= ?", cutoff).Update("last_used_at", now).Error; err != nil {
+					internal(w, err)
+					return
+				}
 			}
 		}
 		next(w, r, p)
 	}
+}
+
+func (a *App) authenticate(w http.ResponseWriter, r *http.Request, allowToken bool, mode string) (principal, bool) {
+	db := a.db.WithContext(r.Context())
+	var p principal
+	if header := r.Header.Get("Authorization"); header != "" {
+		if !allowToken || !strings.HasPrefix(header, "Bearer ") {
+			fail(w, 401, "此接口不接受该凭据")
+			return p, false
+		}
+		if !a.authenticateToken(w, r, &p) {
+			return p, false
+		}
+	} else {
+		cookie, err := r.Cookie("qpix_session")
+		if err != nil {
+			fail(w, 401, "请先登录")
+			return p, false
+		}
+		var session database.Session
+		if err = db.First(&session, "id = ? AND expires_at > ?", digest(cookie.Value), time.Now().UTC()).Error; err != nil {
+			authError(w, err, "登录已失效，请重新登录")
+			return p, false
+		}
+		if err = db.First(&p.User, "id = ?", session.UserID).Error; err != nil {
+			authError(w, err, "账号不存在")
+			return p, false
+		}
+		if r.Method != "GET" && r.Method != "HEAD" && subtle.ConstantTimeCompare([]byte(session.CSRF), []byte(r.Header.Get("X-CSRF-Token"))) != 1 {
+			fail(w, 403, "安全校验失败，请刷新页面")
+			return p, false
+		}
+		p.Session = &session
+	}
+	if !p.User.Enabled {
+		fail(w, 401, "账号已停用")
+		return p, false
+	}
+	if strings.HasPrefix(mode, "admin") && p.User.Role != "admin" {
+		fail(w, 403, "此账号没有操作权限")
+		return p, false
+	}
+	if p.Token != nil && !authorizeTokenRoute(w, r, &p) {
+		return p, false
+	}
+	if !(r.Method == "POST" && r.URL.Path == "/api/v1/images") && !strings.HasPrefix(r.URL.Path, "/i/") {
+		if p.User.Role == "admin" && p.Token == nil {
+			if !a.enforceScope(w, r, "admin") {
+				return p, false
+			}
+		}
+	}
+	return p, true
 }
 
 func authError(w http.ResponseWriter, err error, text string) {
@@ -351,8 +391,9 @@ type window struct {
 	until time.Time
 }
 type limiter struct {
-	mu      sync.Mutex
-	entries map[string]window
+	mu          sync.Mutex
+	entries     map[string]window
+	nextCleanup time.Time
 }
 
 func (l *limiter) allow(key string, limit int, duration time.Duration) bool {
@@ -362,18 +403,23 @@ func (l *limiter) allow(key string, limit int, duration time.Duration) bool {
 		l.entries = make(map[string]window)
 	}
 	now := time.Now()
-	if len(l.entries) > 1024 {
+	if !now.Before(l.nextCleanup) {
 		for key, entry := range l.entries {
 			if !entry.until.After(now) {
 				delete(l.entries, key)
 			}
 		}
+		l.nextCleanup = now.Add(time.Minute)
 	}
-	entry := l.entries[key]
+	entry, exists := l.entries[key]
+	// 达到容量时只拒绝新来源，不能使已有来源全部失效，也不能淘汰仍在限流的记录。
+	if !exists && len(l.entries) >= 10000 {
+		return false
+	}
 	if !entry.until.After(now) {
 		entry = window{until: now.Add(duration)}
 	}
-	if entry.count >= limit || len(l.entries) > 10000 {
+	if entry.count >= limit {
 		return false
 	}
 	entry.count++

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -9,10 +10,11 @@ import (
 	"qpix/internal/database"
 )
 
+// 固定的默认成本哈希仅用于不存在的账号，保证失败登录也执行同等成本的密码校验。
+const dummyPasswordHash = "$2a$10$XajjQvNhvvRt5GSeFk1xFeyqRrsxkhBkUiQeg0dt.wU1qD4aFDcga"
+
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
-	a.policyMu.RLock()
-	defer a.policyMu.RUnlock()
-	if !a.loginLimits.allow(a.requesterIP(r).String(), 15, 15*time.Minute) {
+	if !a.loginLimits.allow(a.limiterIP(r), 15, 15*time.Minute) {
 		w.Header().Set("Retry-After", "900")
 		fail(w, 429, "登录尝试过多，请稍后再试")
 		return
@@ -25,12 +27,35 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var user database.User
-	if err := a.db.WithContext(r.Context()).First(&user, "username = ?", input.Username).Error; err != nil {
+	db := a.db.WithContext(r.Context())
+	err := db.First(&user, "username = ?", input.Username).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		internal(w, err)
+		return
+	}
+	hash := user.PasswordHash
+	if err != nil {
+		hash = dummyPasswordHash
+	}
+	validPassword := len(input.Password) <= 72 && bcrypt.CompareHashAndPassword([]byte(hash), []byte(input.Password)) == nil
+	if err != nil || !validPassword || !user.Enabled || (user.Role != "admin" && user.Role != "user") {
+		fail(w, 401, "用户名或密码错误")
+		return
+	}
+	locked := a.lockPolicy(w)
+	defer locked.release()
+	w = locked
+	// 密码计算期间允许管理操作；创建会话前重新读取，防止密码重置或停用后恢复旧会话。
+	if err = db.First(&user, "id = ?", user.ID).Error; err != nil {
 		authError(w, err, "用户名或密码错误")
 		return
 	}
-	if !user.Enabled || (user.Role != "admin" && user.Role != "user") || len(input.Password) > 72 || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)) != nil {
+	if user.PasswordHash != hash || !user.Enabled || (user.Role != "admin" && user.Role != "user") {
 		fail(w, 401, "用户名或密码错误")
+		return
+	}
+	if !a.sameOrigin(r) {
+		fail(w, 403, "请求来源不被允许")
 		return
 	}
 	// 角色来自数据库，验证密码后再应用对应网络规则，通过后才创建会话。
@@ -81,7 +106,7 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request, p principal
 	if !decode(w, r, &input) {
 		return
 	}
-	if !a.loginLimits.allow("password:"+p.User.ID, 10, 15*time.Minute) {
+	if !a.passwordLimits.allow(p.User.ID, 10, 15*time.Minute) {
 		fail(w, 429, "尝试过多，请稍后再试")
 		return
 	}
@@ -98,6 +123,17 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request, p principal
 		internal(w, err)
 		return
 	}
+	locked, fresh, ok := a.lockWrite(w, r, false, "write")
+	if !ok {
+		return
+	}
+	defer locked.release()
+	w = locked
+	if fresh.User.ID != p.User.ID || fresh.User.PasswordHash != p.User.PasswordHash {
+		fail(w, 409, "密码已变更，请重新登录后重试")
+		return
+	}
+	p = fresh
 	err = a.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&database.User{}).Where("id = ?", p.User.ID).Update("password_hash", string(hash)).Error; err != nil {
 			return err

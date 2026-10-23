@@ -212,11 +212,12 @@ func (a *App) updateProcessing(w http.ResponseWriter, r *http.Request, p princip
 	}
 	raw, _ := json.Marshal(settings)
 	a.settingsMu.Lock()
-	defer a.settingsMu.Unlock()
 	if err := saveSetting(a.db.WithContext(r.Context()), "processing", string(raw)); err != nil {
+		a.settingsMu.Unlock()
 		internal(w, err)
 		return
 	}
 	a.processingSettings = settings
+	a.settingsMu.Unlock()
 	respond(w, 200, settings)
 }

@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"qpix/internal/database"
 )
 
@@ -29,25 +30,21 @@ type userView struct {
 var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 func (a *App) usedBytes(db *gorm.DB, userID string) (int64, error) {
-	var used int64
-	err := db.Model(&database.Image{}).Select("COALESCE(SUM(size), 0)").Where("user_id = ?", userID).Scan(&used).Error
-	return used, err
+	var user database.User
+	err := db.Select("used_bytes").First(&user, "id = ?", userID).Error
+	return user.UsedBytes, err
 }
 
 func (a *App) listUsers(w http.ResponseWriter, r *http.Request, p principal) {
+	db := a.db.WithContext(r.Context())
 	var rows []database.User
-	if err := a.db.WithContext(r.Context()).Order("created_at ASC").Find(&rows).Error; err != nil {
+	if err := db.Order("created_at ASC").Find(&rows).Error; err != nil {
 		internal(w, err)
 		return
 	}
 	items := make([]userView, 0, len(rows))
 	for _, row := range rows {
-		used, err := a.usedBytes(a.db.WithContext(r.Context()), row.ID)
-		if err != nil {
-			internal(w, err)
-			return
-		}
-		items = append(items, userView{User: row, UsedBytes: used})
+		items = append(items, userView{User: row, UsedBytes: row.UsedBytes})
 	}
 	respond(w, 200, items)
 }
@@ -71,18 +68,6 @@ func (a *App) saveUser(w http.ResponseWriter, r *http.Request, p principal) {
 		fail(w, 400, "用户名为 1–64 位字母、数字、下划线、点或短横线，首位为字母或数字")
 		return
 	}
-	if creating {
-		// 写权限锁已串行化账号创建；显式查询避免不同数据库驱动的重复键错误翻译差异。
-		var count int64
-		if err := a.db.WithContext(r.Context()).Model(&database.User{}).Where("username = ?", input.Username).Count(&count).Error; err != nil {
-			internal(w, err)
-			return
-		}
-		if count > 0 {
-			fail(w, 409, "用户名已存在")
-			return
-		}
-	}
 	if creating && input.Password == "" || len(input.Password) > 72 || input.Password != input.ConfirmPassword {
 		fail(w, 400, "密码不能为空，最多 72 字节，且两次输入须一致；编辑时均留空可保留原密码")
 		return
@@ -96,7 +81,29 @@ func (a *App) saveUser(w http.ResponseWriter, r *http.Request, p principal) {
 			return
 		}
 	}
+	locked, fresh, ok := a.lockWrite(w, r, false, "admin-write")
+	if !ok {
+		return
+	}
+	defer locked.release()
+	w, p = locked, fresh
+	if input.MaxFileBytes > a.uploadLimit() {
+		fail(w, 400, "单张上限不能超过服务器限制")
+		return
+	}
 	db := a.db.WithContext(r.Context())
+	if creating {
+		// 账号创建在写锁内检查重名，保留各数据库一致的冲突响应。
+		var count int64
+		if err := db.Model(&database.User{}).Where("username = ?", input.Username).Count(&count).Error; err != nil {
+			internal(w, err)
+			return
+		}
+		if count > 0 {
+			fail(w, 409, "用户名已存在")
+			return
+		}
+	}
 	row := database.User{ID: id}
 	if creating {
 		row = database.User{ID: randomID(), Username: input.Username, PasswordHash: string(hash), Role: "user", Enabled: true, QuotaBytes: input.QuotaBytes, MaxFileBytes: input.MaxFileBytes}
@@ -237,31 +244,41 @@ func (a *App) deleteUser(w http.ResponseWriter, r *http.Request, p principal) {
 }
 
 func (a *App) reserveUpload(r *http.Request, userID string, size int64) (string, error) {
-	a.quotaMu.Lock()
-	defer a.quotaMu.Unlock()
 	id := randomID()
-	err := a.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-		var user database.User
-		if err := tx.First(&user, "id = ? AND enabled = ?", userID, true).Error; err != nil {
-			return err
-		}
+	err := a.withUploadQuota(a.db.WithContext(r.Context()), userID, func(tx *gorm.DB, user database.User) error {
 		if user.MaxFileBytes > 0 && size > user.MaxFileBytes {
 			return errFileLimit
 		}
-		used, err := a.usedBytes(tx, userID)
-		if err != nil {
-			return err
-		}
 		var reserved int64
-		if err = tx.Model(&database.UploadReservation{}).Select("COALESCE(SUM(bytes),0)").Where("user_id = ?", userID).Scan(&reserved).Error; err != nil {
+		if err := tx.Model(&database.UploadReservation{}).Select("COALESCE(SUM(bytes),0)").Where("user_id = ?", userID).Scan(&reserved).Error; err != nil {
 			return err
 		}
-		if user.QuotaBytes > 0 && size > user.QuotaBytes-used-reserved {
+		if user.QuotaBytes > 0 && size > user.QuotaBytes-user.UsedBytes-reserved {
 			return errQuota
 		}
 		return tx.Create(&database.UploadReservation{ID: id, UserID: userID, Bytes: size}).Error
 	})
 	return id, err
+}
+
+// PG/MySQL 只锁定当前用户；SQLite 不支持行锁，沿用进程锁串行处理短事务。
+func (a *App) withUploadQuota(db *gorm.DB, userID string, fn func(*gorm.DB, database.User) error) error {
+	if db.Dialector.Name() == "sqlite" {
+		a.quotaMu.Lock()
+		defer a.quotaMu.Unlock()
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		q := tx
+		if tx.Dialector.Name() != "sqlite" {
+			q = q.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		// 必须先获取用户行锁，再读取预占总量，保证同一用户不会并发超额。
+		var user database.User
+		if err := q.First(&user, "id = ? AND enabled = ?", userID, true).Error; err != nil {
+			return err
+		}
+		return fn(tx, user)
+	})
 }
 
 var errQuota = errors.New("可用容量不足，请清理图片或联系管理员调整配额")
@@ -274,7 +291,6 @@ func (a *App) uploadOptions(w http.ResponseWriter, r *http.Request, p principal)
 		return
 	}
 	a.settingsMu.RLock()
-	defer a.settingsMu.RUnlock()
 	stores := []map[string]string{}
 	for _, profile := range a.profiles {
 		if profile.Enabled {
@@ -285,5 +301,7 @@ func (a *App) uploadOptions(w http.ResponseWriter, r *http.Request, p principal)
 	if p.User.MaxFileBytes > 0 {
 		limit = min(limit, p.User.MaxFileBytes)
 	}
-	respond(w, 200, map[string]any{"max_upload_bytes": limit, "max_pixels": a.maxPixels, "default_storage": a.defaultStorage, "processing": a.processingSettings, "storages": stores, "used_bytes": used, "quota_bytes": p.User.QuotaBytes})
+	options := map[string]any{"max_upload_bytes": limit, "max_pixels": a.maxPixels, "default_storage": a.defaultStorage, "processing": a.processingSettings, "storages": stores, "used_bytes": used, "quota_bytes": p.User.QuotaBytes}
+	a.settingsMu.RUnlock()
+	respond(w, 200, options)
 }

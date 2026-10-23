@@ -92,12 +92,7 @@ export interface Settings {
   version: string;
   formats: string[];
 }
-export interface ImagePage {
-  items: ImageItem[];
-  total: number;
-  page: number;
-  limit: number;
-}
+export type ImagePage = RecordPage<ImageItem>;
 
 export interface ProcessingSettings {
   mode: "none" | "preserve" | "webp";
@@ -154,7 +149,9 @@ export interface ShareItem {
 
 export interface RecordPage<T> {
   items: T[];
-  total: number;
+  total: number | null;
   page: number;
   limit: number;
+  has_more: boolean;
+  next_cursor: string;
 }

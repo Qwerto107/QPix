@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 	"qpix/internal/config"
 	"qpix/internal/database"
@@ -201,9 +202,21 @@ func TestLifecycle(t *testing.T) {
 				Items []imageView
 				Total int64
 			}
-			if err = json.Unmarshal(c.request("GET", "/api/v1/images?album_id="+album.ID+"&q=猫", nil, 200), &listed); err != nil {
-				t.Fatal(err)
-			}
+			func() {
+				var queries atomic.Int64
+				callback := db.Callback().Query()
+				if err := callback.After("gorm:query").Register("qpix:test-list-queries", func(*gorm.DB) { queries.Add(1) }); err != nil {
+					t.Fatal(err)
+				}
+				defer callback.Remove("qpix:test-list-queries")
+				if err = json.Unmarshal(c.request("GET", "/api/v1/images?album_id="+album.ID+"&q=猫", nil, 200), &listed); err != nil {
+					t.Fatal(err)
+				}
+				// 两次会话查询加列表、总数、上传人各一次，不再按图片数量增长。
+				if queries.Load() > 5 {
+					t.Fatalf("图库出现逐条查询：%d 次", queries.Load())
+				}
+			}()
 			if listed.Total != 1 || len(listed.Items) != 1 {
 				t.Fatal("相册或搜索筛选错误")
 			}
@@ -234,6 +247,9 @@ func TestLifecycle(t *testing.T) {
 			store.fail.Store(true)
 			c.request("POST", "/api/v1/images/batch-delete", map[string]any{"ids": []string{uploaded.ID}}, 200)
 			c.request("GET", uploaded.URL, nil, 404)
+			if used, err := a.usedBytes(db, owner.ID); err != nil || used != uploaded.Size {
+				t.Fatal("物理删除失败时不能提前释放用量", used, err)
+			}
 			store.fail.Store(false)
 			a.Maintain(context.Background())
 			var remaining int64
@@ -241,7 +257,11 @@ func TestLifecycle(t *testing.T) {
 			if remaining != 0 {
 				t.Fatal("待删除记录未被重试清理")
 			}
+			if used, err := a.usedBytes(db, owner.ID); err != nil || used != 0 {
+				t.Fatal("物理删除成功后未结算用量", used, err)
+			}
 			c.request("GET", "/api/v1/stats", nil, 200)
+			testSecurityRequests(t, a, c, fixture)
 			testFeatures(t, a, c, root, fixture)
 			testPasswordPolicyAndTokenExpiry(t, a, c, fixture)
 			testPermissionsAndShares(t, a, c, fixture)
@@ -282,6 +302,37 @@ func testPNG(t *testing.T, width, height int) []byte {
 		t.Fatal(err)
 	}
 	return output.Bytes()
+}
+
+func TestThumbnailFormats(t *testing.T) {
+	source := image.NewNRGBA(image.Rect(0, 0, 640, 360))
+	for i := 3; i < len(source.Pix); i += 4 {
+		source.Pix[i] = 255
+	}
+	for _, transparent := range []bool{false, true} {
+		want := "jpeg"
+		if transparent {
+			source.Pix[3] = 0
+			want = "png"
+		}
+		data, _, err := thumbnail(source, "png", 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, format, err := image.Decode(bytes.NewReader(data))
+		if err != nil || format != want || decoded.Bounds().Dx() != 480 || decoded.Bounds().Dy() != 270 {
+			t.Fatal("缩略图格式或尺寸异常", format, err)
+		}
+		if transparent && color.NRGBAModel.Convert(decoded.At(0, 0)).(color.NRGBA).A == 255 {
+			t.Fatal("透明缩略图被填充背景色")
+		}
+	}
+	if data, _, err := thumbnail(image.NewNRGBA(image.Rect(0, 0, 8, 8)), "png", 1024); err != nil || len(data) != 0 {
+		t.Fatal("小图不应重复生成缩略图", err)
+	}
+	if data, _, err := thumbnail(image.NewNRGBA(image.Rect(0, 0, 8, 8)), "png", 1<<20); err != nil || len(data) == 0 {
+		t.Fatal("小尺寸大文件仍应生成缩略图", err)
+	}
 }
 
 func TestBootstrapRequiresPassword(t *testing.T) {

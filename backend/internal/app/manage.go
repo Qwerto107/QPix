@@ -32,15 +32,35 @@ func (a *App) listAlbums(w http.ResponseWriter, r *http.Request, p principal) {
 		return
 	}
 	items := make([]map[string]any, 0, len(albums))
+	ownerIDs := make([]string, 0, len(albums))
+	albumIDs := make([]string, 0, len(albums))
 	for _, album := range albums {
-		var count int64
-		if err := ownerQuery(db.Model(&database.Image{}), p, all).Where("album_id = ? AND state = ?", album.ID, "ready").Count(&count).Error; err != nil {
+		ownerIDs = append(ownerIDs, album.UserID)
+		albumIDs = append(albumIDs, album.ID)
+	}
+	owners, err := usersByID(db, ownerIDs)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	var totals []struct {
+		AlbumID string
+		Count   int64
+	}
+	if len(albumIDs) > 0 {
+		if err := ownerQuery(db.Model(&database.Image{}), p, all).Select("album_id, COUNT(*) AS count").Where("album_id IN ? AND state = ?", albumIDs, "ready").Group("album_id").Scan(&totals).Error; err != nil {
 			internal(w, err)
 			return
 		}
-		var owner database.User
-		if err := db.First(&owner, "id = ?", album.UserID).Error; err != nil {
-			internal(w, err)
+	}
+	counts := make(map[string]int64, len(totals))
+	for _, total := range totals {
+		counts[total.AlbumID] = total.Count
+	}
+	for _, album := range albums {
+		owner, exists := owners[album.UserID]
+		if !exists {
+			internal(w, gorm.ErrRecordNotFound)
 			return
 		}
 		refs := []string{}
@@ -50,7 +70,7 @@ func (a *App) listAlbums(w http.ResponseWriter, r *http.Request, p principal) {
 				return
 			}
 		}
-		items = append(items, map[string]any{"id": album.ID, "name": album.Name, "count": count, "created_at": album.CreatedAt, "guest_visible": album.GuestVisible, "can_upload": p.allowsToken(&album.ID, tokenUpload), "owner_id": album.UserID, "owner_name": owner.Username, "owner_role": owner.Role, "is_default": owner.DefaultAlbumID == album.ID, "referer_mode": album.RefererMode, "referers": refs, "allow_empty_referer": album.AllowEmptyReferer})
+		items = append(items, map[string]any{"id": album.ID, "name": album.Name, "count": counts[album.ID], "created_at": album.CreatedAt, "guest_visible": album.GuestVisible, "can_upload": p.allowsToken(&album.ID, tokenUpload), "owner_id": album.UserID, "owner_name": owner.Username, "owner_role": owner.Role, "is_default": owner.DefaultAlbumID == album.ID, "referer_mode": album.RefererMode, "referers": refs, "allow_empty_referer": album.AllowEmptyReferer})
 	}
 	respond(w, 200, items)
 }
@@ -113,22 +133,26 @@ func (a *App) listTokens(w http.ResponseWriter, r *http.Request, p principal) {
 	db := a.db.WithContext(r.Context())
 	q := ownerQuery(db.Model(&database.APIToken{}), p, all)
 	q = filterRecords(q, r, "name", true)
-	var total int64
-	if err := q.Count(&total).Error; err != nil {
-		internal(w, err)
-		return
-	}
-	page, limit := listPage(r)
-	var rows []database.APIToken
-	if err := q.Order(recordOrder(r)).Offset((page - 1) * limit).Limit(limit).Find(&rows).Error; err != nil {
-		internal(w, err)
+	_, limit := listPage(r)
+	rows, pagination, err := paginate[database.APIToken](q, r, limit, recordOrder(r))
+	if err != nil {
+		paginationError(w, err)
 		return
 	}
 	items := make([]tokenView, 0, len(rows))
+	ownerIDs := make([]string, 0, len(rows))
 	for _, row := range rows {
-		var owner database.User
-		if err := db.First(&owner, "id = ?", row.UserID).Error; err != nil {
-			internal(w, err)
+		ownerIDs = append(ownerIDs, row.UserID)
+	}
+	owners, err := usersByID(db, ownerIDs)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	for _, row := range rows {
+		owner, exists := owners[row.UserID]
+		if !exists {
+			internal(w, gorm.ErrRecordNotFound)
 			return
 		}
 		item, err := a.tokenView(row, owner)
@@ -138,7 +162,7 @@ func (a *App) listTokens(w http.ResponseWriter, r *http.Request, p principal) {
 		}
 		items = append(items, item)
 	}
-	respond(w, 200, map[string]any{"items": items, "total": total, "page": page, "limit": limit})
+	respond(w, 200, pagination.response(items))
 }
 
 func (a *App) createToken(w http.ResponseWriter, r *http.Request, p principal) {

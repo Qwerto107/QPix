@@ -32,18 +32,17 @@ func (a *App) visibleAlbums(db *gorm.DB, p principal) *gorm.DB {
 	}
 	return tokenAlbumQuery(q.Where("user_id = ?", p.User.ID), p, "id", p.TokenOperation)
 }
-func (a *App) visibleImages(db *gorm.DB, p principal) *gorm.DB {
+func imageReadable(row database.Image, p principal) bool {
 	if p.User.Role == "admin" && p.Token == nil {
-		return db
+		return true
 	}
 	if p.Token != nil {
-		return tokenAlbumQuery(db.Where("user_id = ?", p.User.ID), p, "album_id", tokenRead)
+		return row.UserID == p.User.ID && row.AlbumRef != nil && row.AlbumRef.UserID == p.User.ID && p.allowsToken(row.AlbumID, tokenRead)
 	}
-	public := a.db.WithContext(db.Statement.Context).Model(&database.Album{}).Select("id").Where("guest_visible = ?", true)
-	if p.User.ID == "" {
-		return db.Where("album_id IN (?)", public)
+	if p.User.ID != "" && row.UserID == p.User.ID {
+		return true
 	}
-	return db.Where("(user_id = ? OR album_id IN (?))", p.User.ID, public)
+	return row.AlbumRef != nil && row.AlbumRef.GuestVisible
 }
 func (a *App) manageableImages(db *gorm.DB, p principal) *gorm.DB {
 	if p.User.Role == "admin" && p.Token == nil {
@@ -58,22 +57,42 @@ func (a *App) albumWritable(r *http.Request, p principal, id string) bool {
 	return p.allowsToken(&id, tokenUpload) && q.Count(&n).Error == nil && n == 1
 }
 
-func (a *App) viewFor(row database.Image, p principal) imageView {
+// 列表已按资源归属和 Token 相册权限筛选，此处只组装响应，不再逐张查询权限和上传人。
+func (a *App) viewFor(row database.Image, p principal, owner database.User) imageView {
 	view := a.imageView(row)
-	var count int64
-	view.CanManage = a.manageableImages(a.db.Model(&database.Image{}), p).Where("id = ?", row.ID).Count(&count).Error == nil && count == 1
+	view.CanManage = p.User.Role == "admin" || p.User.ID == row.UserID
 	if p.Token != nil {
-		view.CanManage = p.allowsToken(row.AlbumID, tokenEdit) || p.allowsToken(row.AlbumID, tokenDelete)
+		view.CanManage = p.User.ID == row.UserID && (p.allowsToken(row.AlbumID, tokenEdit) || p.allowsToken(row.AlbumID, tokenDelete))
 	}
 	if p.User.Role == "admin" || p.User.ID == row.UserID {
 		view.OwnerID = row.UserID
-		var owner database.User
-		if a.db.Select("username", "role").First(&owner, "id = ?", row.UserID).Error == nil {
-			view.OwnerName = owner.Username
-			view.OwnerRole = owner.Role
-		}
+		view.OwnerName = owner.Username
+		view.OwnerRole = owner.Role
 	}
 	return view
+}
+
+func usersByID(db *gorm.DB, ids []string) (map[string]database.User, error) {
+	owners := make(map[string]database.User)
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]bool)
+	for _, id := range ids {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	if len(unique) == 0 {
+		return owners, nil
+	}
+	var rows []database.User
+	if err := db.Select("id", "username", "role", "default_album_id").Where("id IN ?", unique).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		owners[row.ID] = row
+	}
+	return owners, nil
 }
 
 func (a *App) sessionPrincipal(r *http.Request) (principal, error) {

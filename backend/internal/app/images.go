@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"image"
 	_ "image/gif"
-	_ "image/jpeg"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +23,7 @@ import (
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"qpix/internal/database"
 	"qpix/internal/processing"
 )
@@ -39,11 +43,15 @@ func (a *App) imageView(row database.Image) imageView {
 	base := a.publicURL
 	a.settingsMu.RUnlock()
 	u := base + "/i/" + row.ID + "." + row.Format
-	thumb := u
-	if row.ThumbKey != "" {
-		thumb = base + "/i/" + row.ID + "-thumb.png"
-	}
+	thumb := base + "/i/" + thumbnailFile(row)
 	return imageView{Image: row, URL: u, ThumbnailURL: thumb}
+}
+
+func thumbnailFile(row database.Image) string {
+	if row.ThumbKey == "" {
+		return row.ID + "." + row.Format
+	}
+	return row.ID + "-thumb" + path.Ext(row.ThumbKey)
 }
 
 func (a *App) listImages(w http.ResponseWriter, r *http.Request, p principal) {
@@ -88,21 +96,25 @@ func (a *App) listImages(w http.ResponseWriter, r *http.Request, p principal) {
 		escaped := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(strings.ToLower(search))
 		q = q.Where("LOWER(name) LIKE ? ESCAPE '!'", "%"+escaped+"%")
 	}
-	var total int64
-	if err := q.Count(&total).Error; err != nil {
-		internal(w, err)
-		return
-	}
-	var rows []database.Image
-	if err := q.Order(recordOrder(r)).Offset((page - 1) * limit).Limit(limit).Find(&rows).Error; err != nil {
-		internal(w, err)
+	rows, pagination, err := paginate[database.Image](q, r, limit, recordOrder(r))
+	if err != nil {
+		paginationError(w, err)
 		return
 	}
 	items := make([]imageView, 0, len(rows))
+	ownerIDs := make([]string, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, a.viewFor(row, p))
+		ownerIDs = append(ownerIDs, row.UserID)
 	}
-	respond(w, 200, map[string]any{"items": items, "total": total, "page": page, "limit": limit})
+	owners, err := usersByID(a.db.WithContext(r.Context()), ownerIDs)
+	if err != nil {
+		internal(w, err)
+		return
+	}
+	for _, row := range rows {
+		items = append(items, a.viewFor(row, p, owners[row.UserID]))
+	}
+	respond(w, 200, pagination.response(items))
 }
 
 func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
@@ -111,15 +123,13 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		fail(w, 429, "上传过于频繁，请稍后再试")
 		return
 	}
-	// 同时限制接收与解码数量，避免大图并发放大内存和临时磁盘开销。
-	select {
-	case a.processing <- struct{}{}:
-		defer func() { <-a.processing }()
-	default:
+	release, ok := a.beginUpload(p.User.ID)
+	if !ok {
 		w.Header().Set("Retry-After", "2")
-		fail(w, 429, "图片处理中，请稍后重试")
+		fail(w, 429, "上传请求过多，请稍后重试")
 		return
 	}
+	defer release()
 	limit := a.uploadLimit()
 	if p.User.MaxFileBytes > 0 {
 		limit = min(limit, p.User.MaxFileBytes)
@@ -130,10 +140,14 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 			r.MultipartForm.RemoveAll()
 		}
 		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
+		var fileError *os.PathError
+		if errors.As(err, &tooLarge) || errors.Is(err, multipart.ErrMessageTooLarge) {
 			fail(w, 413, "上传文件超出大小限制")
+		} else if errors.As(err, &fileError) {
+			slog.Error("写入上传临时文件失败", "error", err)
+			fail(w, 500, "服务器临时存储不可用，请稍后重试或联系管理员")
 		} else {
-			fail(w, 400, "请使用 multipart/form-data 上传图片")
+			fail(w, 400, "上传内容不完整或 multipart/form-data 格式无效")
 		}
 		return
 	}
@@ -145,6 +159,15 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 	header := r.MultipartForm.File["file"][0]
 	if header.Size <= 0 || header.Size > limit {
 		fail(w, 413, "图片为空或超出大小限制")
+		return
+	}
+	// 慢速请求体只占用接收名额，完整收到文件后才占用图片处理名额。
+	select {
+	case a.processing <- struct{}{}:
+		defer func() { <-a.processing }()
+	default:
+		w.Header().Set("Retry-After", "2")
+		fail(w, 429, "图片处理中，请稍后重试")
 		return
 	}
 	reservation, err := a.reserveUpload(r, p.User.ID, header.Size)
@@ -192,12 +215,7 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		return
 	}
 	defer file.Close()
-	data, err := io.ReadAll(file)
-	if err != nil {
-		internal(w, err)
-		return
-	}
-	info, format, err := processing.Config(data)
+	info, format, err := processing.ConfigReader(file)
 	if err != nil || (format != "jpeg" && format != "png" && format != "gif" && format != "webp") {
 		fail(w, 415, "仅支持有效的 JPEG、PNG、GIF、静态 WebP 图片")
 		return
@@ -206,7 +224,11 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		fail(w, 413, "图片像素超出服务器设置的上限")
 		return
 	}
-	decoded, err := processing.Decode(data, format)
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		internal(w, err)
+		return
+	}
+	decoded, err := processing.DecodeReader(file, format)
 	if err != nil {
 		fail(w, 415, "图片内容不完整或格式暂不支持")
 		return
@@ -215,27 +237,38 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		fail(w, 415, "图片尺寸校验失败")
 		return
 	}
-	a.settingsMu.RLock()
-	locked := true
-	defer func() {
-		if locked {
-			a.settingsMu.RUnlock()
-		}
-	}()
+	a.settingsMu.Lock()
 	storageID := r.FormValue("storage_id")
 	if storageID == "" {
 		storageID = a.defaultStorage
 	}
 	profile, exists := a.profiles[storageID]
-	if !exists || !profile.Enabled {
+	store := a.stores[storageID]
+	defaults := a.processingSettings
+	// 在途上传占用存储引用，替代覆盖网络 I/O 的设置读锁。
+	if !exists || !profile.Enabled || store == nil {
+		a.settingsMu.Unlock()
 		fail(w, 400, "存储不存在或已停用")
 		return
 	}
+	if a.storageUploads == nil {
+		a.storageUploads = make(map[string]int)
+	}
+	a.storageUploads[storageID]++
+	a.settingsMu.Unlock()
+	defer func() {
+		a.settingsMu.Lock()
+		a.storageUploads[storageID]--
+		if a.storageUploads[storageID] == 0 {
+			delete(a.storageUploads, storageID)
+		}
+		a.settingsMu.Unlock()
+	}()
 	mode := r.FormValue("compression")
 	if mode == "" || mode == "default" {
-		mode = a.processingSettings.Mode
+		mode = defaults.Mode
 	}
-	quality := a.processingSettings.Quality
+	quality := defaults.Quality
 	if values, present := r.MultipartForm.Value["quality"]; present {
 		if len(values) != 1 {
 			fail(w, 400, "画质必须为 1–100 的整数")
@@ -252,11 +285,29 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 		return
 	}
 	status := "original"
+	var data []byte
 	if mode != "none" {
-		result := processing.Optimize(data, decoded, format, mode, quality)
-		data, format, status = result.Data, result.Format, result.Status
-		if status == "optimized" {
-			info.Width, info.Height = decoded.Bounds().Dx(), decoded.Bounds().Dy()
+		switch {
+		case format == "gif":
+			status = "unsupported"
+		case int64(info.Width)*int64(info.Height) > processing.MaxPixels:
+			status = "pixel_limit"
+		default:
+			if _, err = file.Seek(0, io.SeekStart); err != nil {
+				internal(w, err)
+				return
+			}
+			original, readErr := io.ReadAll(file)
+			if readErr != nil {
+				internal(w, readErr)
+				return
+			}
+			result := processing.Optimize(original, decoded, format, mode, quality)
+			format, status = result.Format, result.Status
+			if status == "optimized" {
+				data = result.Data
+				info.Width, info.Height = decoded.Bounds().Dx(), decoded.Bounds().Dy()
+			}
 		}
 	}
 	if format == "jpeg" {
@@ -264,8 +315,16 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 	}
 	id := randomID()
 	folder := time.Now().UTC().Format("2006/01/")
-	row := database.Image{ID: id, UserID: p.User.ID, AlbumID: albumID, Name: name, StorageID: storageID, Key: folder + id + "." + format, Format: format, Size: int64(len(data)), OriginalSize: header.Size, Optimized: status == "optimized", CompressionStatus: status, Width: info.Width, Height: info.Height, State: "ready"}
-	store := a.stores[row.StorageID]
+	size := header.Size
+	var content io.Reader = file
+	if data != nil {
+		size = int64(len(data))
+		content = bytes.NewReader(data)
+	} else if _, err = file.Seek(0, io.SeekStart); err != nil {
+		internal(w, err)
+		return
+	}
+	row := database.Image{ID: id, UserID: p.User.ID, AlbumID: albumID, Name: name, StorageID: storageID, Key: folder + id + "." + format, Format: format, Size: size, OriginalSize: header.Size, Optimized: status == "optimized", CompressionStatus: status, Width: info.Width, Height: info.Height, State: "ready"}
 	// 文件存储和数据库不共享事务；失败时补偿清理，清理失败保留日志供核对。
 	committed := false
 	defer func() {
@@ -281,15 +340,15 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 			}
 		}
 	}()
-	if err = store.Put(r.Context(), row.Key, bytes.NewReader(data)); err != nil {
+	if err = store.Put(r.Context(), row.Key, content); err != nil {
 		internal(w, err)
 		return
 	}
-	thumb, err := thumbnail(decoded)
+	thumb, thumbFormat, err := thumbnail(decoded, format, row.Size)
 	if err != nil {
 		slog.Warn("缩略图生成失败，使用原图", "image_id", id, "error", err)
-	} else {
-		key := folder + id + "-thumb.png"
+	} else if len(thumb) > 0 {
+		key := folder + id + "-thumb." + thumbFormat
 		if err = store.Put(r.Context(), key, bytes.NewReader(thumb)); err != nil {
 			slog.Warn("缩略图保存失败，使用原图", "image_id", id, "error", err)
 			// S3 响应丢失时对象可能已经写入，清理独立随机键避免留下孤立缩略图。
@@ -302,27 +361,99 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request, p principal) {
 			row.ThumbKey = key
 		}
 	}
-	a.quotaMu.Lock()
-	err = a.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+	locked := a.lockPolicy(w)
+	defer locked.release()
+	w = locked
+	// 接收和处理期间不阻塞管理操作；提交前以当前状态重新检查全部授权。
+	p, ok = a.authenticate(w, r, true, "any")
+	if !ok || !a.enforceAccess(w, r) {
+		return
+	}
+	if !a.sameOrigin(r) {
+		fail(w, 403, "请求来源不被允许")
+		return
+	}
+	if !requireTokenPermission(w, p, albumID, tokenUpload) {
+		return
+	}
+	if !a.albumWritable(r, p, *albumID) {
+		fail(w, 400, "相册不存在或没有上传权限")
+		return
+	}
+	limit = a.uploadLimit()
+	if p.User.MaxFileBytes > 0 {
+		limit = min(limit, p.User.MaxFileBytes)
+	}
+	if header.Size > limit || int64(info.Width) > a.pixelLimit()/int64(info.Height) {
+		fail(w, 413, "图片超出当前大小或像素上限")
+		return
+	}
+	a.settingsMu.RLock()
+	enabled := a.profiles[storageID].Enabled
+	a.settingsMu.RUnlock()
+	if !enabled {
+		fail(w, 409, "存储已停用，请重新选择存储")
+		return
+	}
+	err = a.withUploadQuota(a.db.WithContext(r.Context()), p.User.ID, func(tx *gorm.DB, user database.User) error {
+		var reserved int64
+		if err := tx.Model(&database.UploadReservation{}).Select("COALESCE(SUM(bytes),0)").Where("user_id = ? AND id <> ?", p.User.ID, reservation).Scan(&reserved).Error; err != nil {
+			return err
+		}
+		if user.QuotaBytes > 0 && row.Size > user.QuotaBytes-user.UsedBytes-reserved {
+			return errQuota
+		}
 		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&database.User{}).Where("id = ?", row.UserID).UpdateColumn("used_bytes", gorm.Expr("used_bytes + ?", row.Size)).Error; err != nil {
 			return err
 		}
 		return tx.Delete(&database.UploadReservation{}, "id = ?", reservation).Error
 	})
-	a.quotaMu.Unlock()
 	if err != nil {
-		internal(w, err)
+		if errors.Is(err, errQuota) {
+			fail(w, 409, err.Error())
+		} else {
+			internal(w, err)
+		}
 		return
 	}
 	committed = true
-	a.settingsMu.RUnlock()
-	locked = false
-	respond(w, 201, a.viewFor(row, p))
+	locked.release()
+	respond(w, 201, a.viewFor(row, p, p.User))
 }
 
-func thumbnail(source image.Image) ([]byte, error) {
+func (a *App) beginUpload(userID string) (func(), bool) {
+	a.uploadMu.Lock()
+	defer a.uploadMu.Unlock()
+	// 接收总量有界，并限制单个账号，避免同一 Token 独占全站临时文件名额。
+	if a.uploadCount >= 8 || a.uploads[userID] >= 2 {
+		return nil, false
+	}
+	if a.uploads == nil {
+		a.uploads = make(map[string]int)
+	}
+	a.uploads[userID]++
+	a.uploadCount++
+	return func() {
+		a.uploadMu.Lock()
+		defer a.uploadMu.Unlock()
+		a.uploadCount--
+		a.uploads[userID]--
+		if a.uploads[userID] == 0 {
+			delete(a.uploads, userID)
+		}
+	}, true
+}
+
+func thumbnail(source image.Image, format string, size int64) ([]byte, string, error) {
 	bounds := source.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
+	// 小尺寸但体积大的图片仍生成缩略图，避免列表反复下载大块元数据或原图尾部数据。
+	if width <= 480 && height <= 480 && size <= 128<<10 && format != "gif" {
+		return nil, "", nil
+	}
 	if width > 480 || height > 480 {
 		if width >= height {
 			height = max(1, height*480/width)
@@ -335,8 +466,12 @@ func thumbnail(source image.Image) ([]byte, error) {
 	target := image.NewNRGBA(image.Rect(0, 0, width, height))
 	draw.ApproxBiLinear.Scale(target, target.Bounds(), source, bounds, draw.Src, nil)
 	var output bytes.Buffer
+	if target.Opaque() {
+		err := jpeg.Encode(&output, target, &jpeg.Options{Quality: 82})
+		return output.Bytes(), "jpg", err
+	}
 	err := png.Encode(&output, target)
-	return output.Bytes(), err
+	return output.Bytes(), "png", err
 }
 
 func (a *App) updateImage(w http.ResponseWriter, r *http.Request, p principal) {
@@ -441,11 +576,18 @@ func (a *App) deleteImages(w http.ResponseWriter, r *http.Request, p principal) 
 			failed = append(failed, id)
 		}
 	}
+	ids := make([]string, 0, len(rows))
 	for _, row := range rows {
-		if err := db.Model(&row).Update("state", "deleting").Error; err != nil {
+		ids = append(ids, row.ID)
+	}
+	if len(ids) > 0 {
+		if err := db.Model(&database.Image{}).Where("id IN ?", ids).Update("state", "deleting").Error; err != nil {
 			internal(w, err)
 			return
 		}
+	}
+	releasePolicy(w)
+	for _, row := range rows {
 		store := a.getStore(row.StorageID)
 		if store == nil {
 			failed = append(failed, row.ID)
@@ -461,7 +603,7 @@ func (a *App) deleteImages(w http.ResponseWriter, r *http.Request, p principal) 
 				continue
 			}
 		}
-		if err := db.Delete(&row).Error; err != nil {
+		if err := a.removeImageRecord(db, row); err != nil {
 			internal(w, err)
 			return
 		}
@@ -475,21 +617,19 @@ func (a *App) serveImage(w http.ResponseWriter, r *http.Request) {
 		a.protect(a.serveTokenImage, true)(w, r)
 		return
 	}
-	a.policyMu.RLock()
-	defer a.policyMu.RUnlock()
 	p, err := a.sessionPrincipal(r)
 	if err != nil {
 		internal(w, err)
 		return
 	}
-	a.serveStoredImage(w, r, func(db *gorm.DB) *gorm.DB { return a.visibleImages(db, p) })
+	a.serveStoredImage(w, r, func(row database.Image) bool { return imageReadable(row, p) })
 }
 
 func (a *App) serveTokenImage(w http.ResponseWriter, r *http.Request, p principal) {
-	a.serveStoredImage(w, r, func(db *gorm.DB) *gorm.DB { return a.visibleImages(db, p) })
+	a.serveStoredImage(w, r, func(row database.Image) bool { return imageReadable(row, p) })
 }
 
-func (a *App) serveStoredImage(w http.ResponseWriter, r *http.Request, permitted func(*gorm.DB) *gorm.DB) {
+func (a *App) serveStoredImage(w http.ResponseWriter, r *http.Request, permitted func(database.Image) bool) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	file := r.PathValue("file")
 	if len(file) < 36 || len(file) > 45 {
@@ -498,21 +638,34 @@ func (a *App) serveStoredImage(w http.ResponseWriter, r *http.Request, permitted
 	}
 	id := file[:32]
 	var row database.Image
-	if err := permitted(a.db.WithContext(r.Context())).First(&row, "id = ? AND state = ?", id, "ready").Error; err != nil {
+	// 同一查询加载图片与所属相册，权限和 Referer 均使用本次数据库快照，不缓存授权结果。
+	err := a.db.WithContext(r.Context()).Joins("AlbumRef").
+		Where(clause.Eq{Column: clause.Column{Table: clause.CurrentTable, Name: "id"}, Value: id}).
+		Where(clause.Eq{Column: clause.Column{Table: clause.CurrentTable, Name: "state"}, Value: "ready"}).First(&row).Error
+	if err != nil || !permitted(row) {
 		http.NotFound(w, r)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/i/") && !a.enforceAlbumAccess(w, r, row.AlbumID) {
-		return
+	if strings.HasPrefix(r.URL.Path, "/i/") {
+		if row.AlbumID != nil && row.AlbumRef == nil && !a.cfg.DisableAccessRules {
+			http.NotFound(w, r)
+			return
+		}
+		if !a.enforceAlbumAccess(w, r, row.AlbumRef) {
+			return
+		}
 	}
 	key := row.Key
 	contentType := "image/" + row.Format
 	if row.Format == "jpg" {
 		contentType = "image/jpeg"
 	}
-	if file == id+"-thumb.png" && row.ThumbKey != "" {
+	if file == thumbnailFile(row) && row.ThumbKey != "" {
 		key = row.ThumbKey
 		contentType = "image/png"
+		if path.Ext(key) == ".jpg" || path.Ext(key) == ".jpeg" {
+			contentType = "image/jpeg"
+		}
 	} else if file != id+"."+row.Format {
 		http.NotFound(w, r)
 		return
@@ -522,23 +675,23 @@ func (a *App) serveStoredImage(w http.ResponseWriter, r *http.Request, permitted
 		http.NotFound(w, r)
 		return
 	}
+	etag := fmt.Sprintf("\"%s\"", file)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("ETag", etag)
+	// 权限与相册规则检查先于 304；匹配时不再读取本地文件或发起 S3 GetObject。
+	if matchesETag(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	reader, err := store.Open(r.Context(), key)
 	if err != nil {
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Del("ETag")
+		w.Header().Del("Content-Type")
 		http.NotFound(w, r)
 		return
 	}
 	defer reader.Close()
-	etag := fmt.Sprintf("\"%s\"", file)
-	w.Header().Set("Content-Type", contentType)
-	// 每次重新验证，删除图片后不会继续从浏览器强缓存中展示；外部 CDN 需另行清理。
-	if w.Header().Get("Cache-Control") == "" {
-		w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
-	}
-	w.Header().Set("ETag", etag)
-	if r.Header.Get("If-None-Match") == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
 	if key == row.Key {
 		w.Header().Set("Content-Length", strconv.FormatInt(row.Size, 10))
 	}
@@ -548,4 +701,14 @@ func (a *App) serveStoredImage(w http.ResponseWriter, r *http.Request, permitted
 	if _, err := io.Copy(w, reader); err != nil {
 		slog.Debug("图片传输中断", "error", err)
 	}
+}
+
+func matchesETag(header, etag string) bool {
+	for _, value := range strings.Split(header, ",") {
+		value = strings.TrimSpace(value)
+		if value == "*" || strings.TrimPrefix(value, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }

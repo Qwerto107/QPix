@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -97,6 +96,7 @@ func (a *App) updateAlbumAccess(w http.ResponseWriter, r *http.Request, p princi
 		internal(w, err)
 		return
 	}
+	a.invalidateAlbumRule(album.ID)
 	respond(w, 200, map[string]bool{"ok": true})
 }
 func (a *App) deleteAlbum(w http.ResponseWriter, r *http.Request, p principal) {
@@ -150,9 +150,13 @@ func (a *App) deleteAlbum(w http.ResponseWriter, r *http.Request, p principal) {
 			return
 		}
 	}
+	var deletedImages []database.Image
 	err := db.Transaction(func(tx *gorm.DB) error {
 		q := tx.Model(&database.Image{}).Where("album_id = ?", album.ID)
 		if input.Action == "delete" {
+			if err := q.Session(&gorm.Session{}).Find(&deletedImages).Error; err != nil {
+				return err
+			}
 			if err := q.Updates(map[string]any{"state": "deleting", "album_id": nil}).Error; err != nil {
 				return err
 			}
@@ -168,8 +172,10 @@ func (a *App) deleteAlbum(w http.ResponseWriter, r *http.Request, p principal) {
 		return
 	}
 	// 先标记再清理，存储暂不可用时由后台重试，原图及分享网关立即停止读取。
-	if input.Action == "delete" {
-		a.cleanupDeleted(r.Context())
+	a.invalidateAlbumRule(album.ID)
+	releasePolicy(w)
+	if len(deletedImages) > 0 {
+		a.cleanupImages(r.Context(), deletedImages)
 	}
 	respond(w, 200, map[string]bool{"ok": true})
 }
@@ -224,33 +230,21 @@ func (a *App) moveImages(w http.ResponseWriter, r *http.Request, p principal) {
 }
 
 // 外链只覆盖 Referer，始终保留全局 IP 规则；规则错误时关闭访问。
-func (a *App) enforceAlbumAccess(w http.ResponseWriter, r *http.Request, albumID *string) bool {
+func (a *App) enforceAlbumAccess(w http.ResponseWriter, r *http.Request, album *database.Album) bool {
 	if a.cfg.DisableAccessRules {
 		return true
 	}
 	a.settingsMu.RLock()
 	rule := a.accessRules["images"]
 	a.settingsMu.RUnlock()
-	if albumID != nil {
-		var album database.Album
-		if err := a.db.WithContext(r.Context()).First(&album, "id = ?", *albumID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				http.NotFound(w, r)
-			} else {
-				internal(w, err)
-			}
-			return false
-		}
+	guestVisible := false
+	if album != nil {
+		guestVisible = album.GuestVisible
 		if album.RefererMode == "unrestricted" {
 			rule.input.RefererEnabled = false
 		}
 		if album.RefererMode == "custom" {
-			var refs []string
-			if err := json.Unmarshal([]byte(album.Referers), &refs); err != nil {
-				internal(w, err)
-				return false
-			}
-			custom, err := compileRule(ruleInput{Scope: "images", RefererEnabled: true, Referers: refs, AllowEmptyReferer: album.AllowEmptyReferer})
+			custom, err := a.compiledAlbumRule(*album)
 			if err != nil {
 				internal(w, err)
 				return false
@@ -263,6 +257,10 @@ func (a *App) enforceAlbumAccess(w http.ResponseWriter, r *http.Request, albumID
 	if !rule.allows(a.requesterIP(r), r.Header.Get("Referer")) {
 		fail(w, 403, "请求不满足相册访问规则")
 		return false
+	}
+	// 只允许无网络限制的访客直链在浏览器保存，并要求每次回源校验；禁止共享缓存。
+	if guestVisible && !rule.input.IPEnabled && !rule.input.RefererEnabled && r.Header.Get("Authorization") == "" {
+		w.Header().Set("Cache-Control", "private, no-cache, must-revalidate")
 	}
 	return true
 }
